@@ -1,7 +1,7 @@
 function Get-FolderSizeFast {
     param(
         [string]$Path,
-        [int]$MaxItems = 15000
+        [int]$MaxItems = 25000
     )
 
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -9,27 +9,30 @@ function Get-FolderSizeFast {
     }
 
     try {
-        $fso = New-Object -ComObject Scripting.FileSystemObject
-        $folder = $fso.GetFolder($Path)
-        $totalBytes = [long]$folder.Size
-        $count = $folder.Files.Count + $folder.SubFolders.Count
+        $totalBytes = [long]0
+        $count = 0
+        $queue = New-Object System.Collections.Generic.Queue[string]
+        $queue.Enqueue($Path)
+
+        while ($queue.Count -gt 0 -and $count -lt $MaxItems) {
+            $current = $queue.Dequeue()
+            try {
+                $dirInfo = New-Object System.IO.DirectoryInfo($current)
+                foreach ($file in $dirInfo.EnumerateFiles()) {
+                    try {
+                        $totalBytes += $file.Length
+                        $count++
+                        if ($count -ge $MaxItems) { break }
+                    } catch {}
+                }
+                foreach ($sub in $dirInfo.EnumerateDirectories()) {
+                    $queue.Enqueue($sub.FullName)
+                }
+            } catch {}
+        }
         return @{ RawBytes = $totalBytes; FileCount = $count; Exists = $true }
     } catch {
-        # High speed .NET EnumerateFiles fallback
-        try {
-            $totalBytes = [long]0
-            $count = 0
-            $dirInfo = New-Object System.IO.DirectoryInfo($Path)
-            $files = $dirInfo.EnumerateFiles('*', [System.IO.SearchOption]::AllDirectories)
-            foreach ($f in $files) {
-                $totalBytes += $f.Length
-                $count++
-                if ($count -ge $MaxItems) { break }
-            }
-            return @{ RawBytes = $totalBytes; FileCount = $count; Exists = $true }
-        } catch {
-            return @{ RawBytes = [long]0; FileCount = 0; Exists = $true }
-        }
+        return @{ RawBytes = [long]0; FileCount = 0; Exists = $true }
     }
 }
 
@@ -524,14 +527,16 @@ function Scan-SmartCleanupItems {
         }
 
         $disp = Format-Bytes -Bytes $rawBytes
-        $isSelected = ($t.Recommended -and $rawBytes -gt 0)
+        $isAdminCurrent = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        $isSelected = ($t.Recommended -and $rawBytes -gt 0 -and (-not $t.RequiresAdmin -or $isAdminCurrent))
+        $displayName = if ($t.RequiresAdmin -and -not $isAdminCurrent) { "$($t.Category) [Admin Required]" } else { $t.Category }
 
         $results += [PSCustomObject]@{
             Id            = $t.Id
             Group         = $t.Group
             CategoryName  = $t.Category
             Icon          = $t.Icon
-            DisplayName   = $t.Category
+            DisplayName   = $displayName
             Target        = $t.Path
             Type          = $t.Type
             SafetyLevel   = $t.SafetyLevel
@@ -606,32 +611,56 @@ function Invoke-ExecuteCleanup {
     $totalDeletedCount = 0
     $logMessages = @()
 
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
     foreach ($item in $SelectedItems) {
         if (-not $item.IsSelected) { continue }
+
+        # Check if item requires Administrator rights
+        if ($item.RequiresAdmin -and -not $isAdmin) {
+            $msg = "Skipped $($item.CategoryName): Task cannot be completed due to lack of Administrator privileges. Please launch Diskman as Administrator (run.bat) to clean this item."
+            $logMessages += $msg
+            if ($null -ne $OnProgress) {
+                & $OnProgress "Starting purge of $($item.CategoryName) ($($item.DisplaySize))..." "INFO"
+                & $OnProgress "  [!] $msg" "WARN"
+            }
+            continue
+        }
 
         if ($null -ne $OnProgress) {
             & $OnProgress "Starting purge of $($item.CategoryName) ($($item.DisplaySize))..." "INFO"
         }
 
-        # Handle Windows Services file locks
+        # Handle Windows Services file locks (only when running elevated)
         $restartedServices = @()
-        if ($item.Id -eq 'WinUpdateCache') {
-            if ($null -ne $OnProgress) {
-                & $OnProgress "  -> Temporarily releasing Windows Update service lock (wuauserv)..." "INFO"
+        if ($isAdmin) {
+            if ($item.Id -eq 'WinUpdateCache') {
+                if ($null -ne $OnProgress) {
+                    & $OnProgress "  -> Temporarily releasing Windows Update service lock (wuauserv)..." "INFO"
+                }
+                try {
+                    $wuauserv = Get-Service -Name "wuauserv" -ErrorAction SilentlyContinue
+                    if ($wuauserv -and $wuauserv.Status -eq 'Running') {
+                        Stop-Service -Name "wuauserv" -Force -ErrorAction SilentlyContinue
+                        $restartedServices += "wuauserv"
+                    }
+                } catch {}
+                try {
+                    $bits = Get-Service -Name "bits" -ErrorAction SilentlyContinue
+                    if ($bits -and $bits.Status -eq 'Running') {
+                        Stop-Service -Name "bits" -Force -ErrorAction SilentlyContinue
+                        $restartedServices += "bits"
+                    }
+                } catch {}
+            } elseif ($item.Id -eq 'DeliveryOpt') {
+                try {
+                    $doSvc = Get-Service -Name "DoSvc" -ErrorAction SilentlyContinue
+                    if ($doSvc -and $doSvc.Status -eq 'Running') {
+                        Stop-Service -Name "DoSvc" -Force -ErrorAction SilentlyContinue
+                        $restartedServices += "DoSvc"
+                    }
+                } catch {}
             }
-            try {
-                Stop-Service -Name "wuauserv" -Force -ErrorAction SilentlyContinue
-                $restartedServices += "wuauserv"
-            } catch {}
-            try {
-                Stop-Service -Name "bits" -Force -ErrorAction SilentlyContinue
-                $restartedServices += "bits"
-            } catch {}
-        } elseif ($item.Id -eq 'DeliveryOpt') {
-            try {
-                Stop-Service -Name "DoSvc" -Force -ErrorAction SilentlyContinue
-                $restartedServices += "DoSvc"
-            } catch {}
         }
 
         if ($item.Type -eq 'RecycleBin') {
@@ -707,22 +736,13 @@ function Invoke-ExecuteCleanup {
                             try {
                                 [System.IO.Directory]::Delete($entry.FullName, $true)
                                 $entryDeleted = $true
+                            } catch [System.UnauthorizedAccessException] {
+                                $entryDeleted = $false
                             } catch {
-                                # Fallback 1: cmd rmdir
                                 try {
-                                    cmd.exe /c "rmdir /s /q `"$($entry.FullName)`"" 2>$null
-                                    if (-not (Test-Path -LiteralPath $entry.FullName)) {
-                                        $entryDeleted = $true
-                                    }
+                                    Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+                                    $entryDeleted = $true
                                 } catch {}
-
-                                # Fallback 2: PowerShell Remove-Item
-                                if (-not $entryDeleted) {
-                                    try {
-                                        Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
-                                        $entryDeleted = $true
-                                    } catch {}
-                                }
                             }
                         } else {
                             $entryBytes = [long]$entry.Length
@@ -734,6 +754,8 @@ function Invoke-ExecuteCleanup {
                             try {
                                 [System.IO.File]::Delete($entry.FullName)
                                 $entryDeleted = $true
+                            } catch [System.UnauthorizedAccessException] {
+                                $entryDeleted = $false
                             } catch {
                                 try {
                                     Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
@@ -781,7 +803,11 @@ function Invoke-ExecuteCleanup {
                 $freedFormatted = Format-Bytes -Bytes $catFreedBytes
                 $msg = "Purged $($item.CategoryName): Cleaned $catDeletedCount items (Freed $freedFormatted)"
                 if ($catSkippedCount -gt 0) {
-                    $msg += " [$catSkippedCount locked/protected items skipped]"
+                    if (-not $isAdmin) {
+                        $msg += " [$catSkippedCount locked/in-use items skipped (run as Administrator to clean system items)]"
+                    } else {
+                        $msg += " [$catSkippedCount locked/protected items skipped]"
+                    }
                 }
 
                 $logMessages += $msg

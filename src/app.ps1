@@ -204,7 +204,11 @@ function Start-ScanCJunk {
 # Selection Presets
 $btnSelectRec.add_Click({
     foreach ($item in $global:ScannedCleanupItems) {
-        $item.IsSelected = ($item.Recommended -and $item.RawBytes -gt 0)
+        if ($item.RequiresAdmin -and -not $isAdmin) {
+            $item.IsSelected = $false
+        } else {
+            $item.IsSelected = ($item.Recommended -and $item.RawBytes -gt 0)
+        }
     }
     $gridCleanCategories.Items.Refresh()
     Update-SelectedCleanupBadge
