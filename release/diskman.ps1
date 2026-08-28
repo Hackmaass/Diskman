@@ -359,7 +359,7 @@ function Get-CleanableTargets {
     [CmdletBinding()]
     param()
 
-    $userTempPath = [System.IO.Path]::GetTempPath()
+    $userTempPath = [System.IO.Path]::GetTempPath().TrimEnd('\')
     $localAppData = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData)
     $appData      = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ApplicationData)
     $userProfile  = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
@@ -681,8 +681,8 @@ function Invoke-ExecuteCleanup {
         [scriptblock]$OnProgress = $null
     )
 
-    $freedBytes = 0
-    $deletedCount = 0
+    $totalFreedBytes = [long]0
+    $totalDeletedCount = 0
     $logMessages = @()
 
     foreach ($item in $SelectedItems) {
@@ -698,7 +698,8 @@ function Invoke-ExecuteCleanup {
                     & $OnProgress "Clearing Windows Recycle Bin..." "INFO"
                 }
                 Clear-RecycleBin -Force -ErrorAction SilentlyContinue
-                $freedBytes += $item.RawBytes
+                $totalFreedBytes += $item.RawBytes
+                $totalDeletedCount += $item.RawCount
                 $msg = "Emptied Recycle Bin (Freed $(Format-Bytes -Bytes $item.RawBytes))"
                 $logMessages += $msg
                 if ($null -ne $OnProgress) {
@@ -716,45 +717,75 @@ function Invoke-ExecuteCleanup {
 
         $targetPath = $item.Target
         if (Test-Path -LiteralPath $targetPath) {
-            $initialSize = $item.RawBytes
-            $catFreed = 0
-            $catDeleted = 0
+            $initialCategoryBytes = $item.RawBytes
+            $catFreedBytes = [long]0
+            $catDeletedCount = 0
+            $catSkippedCount = 0
 
             try {
                 $itemsToClean = Get-ChildItem -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
                 $totalInCat = ($itemsToClean | Measure-Object).Count
 
                 foreach ($entry in $itemsToClean) {
+                    $entryBytes = [long]0
+                    $entryDeleted = $false
+
                     try {
                         if ($entry.PSIsContainer) {
-                            Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                            # Measure container size before fast deletion
+                            $entryBytes = (Get-FolderSizeFast -Path $entry.FullName).RawBytes
+                            try {
+                                [System.IO.Directory]::Delete($entry.FullName, $true)
+                                $entryDeleted = $true
+                            } catch {
+                                Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+                                $entryDeleted = $true
+                            }
                         } else {
-                            $len = $entry.Length
-                            Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction SilentlyContinue
-                            $catFreed += $len
-                        }
-                        $catDeleted++
-
-                        # Stream progress live to terminal every few items or on major steps
-                        if ($catDeleted % 5 -eq 0 -or $catDeleted -le 3 -or $catDeleted -eq $totalInCat) {
-                            if ($null -ne $OnProgress) {
-                                & $OnProgress "  [$catDeleted / $totalInCat] Cleaned: $($entry.Name)" "INFO"
+                            $entryBytes = [long]$entry.Length
+                            try {
+                                [System.IO.File]::Delete($entry.FullName)
+                                $entryDeleted = $true
+                            } catch {
+                                Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
+                                $entryDeleted = $true
                             }
                         }
-                    } catch {}
+
+                        if ($entryDeleted) {
+                            $catDeletedCount++
+                            $catFreedBytes += $entryBytes
+
+                            # Stream live progress every few items
+                            if ($catDeletedCount % 5 -eq 0 -or $catDeletedCount -le 3 -or $catDeletedCount -eq $totalInCat) {
+                                if ($null -ne $OnProgress) {
+                                    & $OnProgress "  [$catDeletedCount / $totalInCat] Cleaned: $($entry.Name)" "INFO"
+                                }
+                            }
+                        }
+                    } catch {
+                        # Locked file or permission denial
+                        $catSkippedCount++
+                    }
 
                     # UI Message pumping to prevent freezing
                     try { [System.Windows.Forms.Application]::DoEvents() } catch {}
                 }
 
-                $deletedCount += $catDeleted
-                if ($catFreed -gt 0) {
-                    $freedBytes += $catFreed
-                } else {
-                    $freedBytes += $initialSize
+                # If individual sizes couldn't be summed but items were deleted, use initialCategoryBytes
+                if ($catFreedBytes -le 0 -and $catDeletedCount -gt 0) {
+                    $catFreedBytes = $initialCategoryBytes
                 }
 
-                $msg = "Purged $($item.CategoryName): Cleaned $catDeleted items (Freed $(Format-Bytes -Bytes $initialSize))"
+                $totalFreedBytes += $catFreedBytes
+                $totalDeletedCount += $catDeletedCount
+
+                $freedFormatted = Format-Bytes -Bytes $catFreedBytes
+                $msg = "Purged $($item.CategoryName): Cleaned $catDeletedCount items (Freed $freedFormatted)"
+                if ($catSkippedCount -gt 0) {
+                    $msg += " [$catSkippedCount locked items skipped]"
+                }
+
                 $logMessages += $msg
                 if ($null -ne $OnProgress) {
                     & $OnProgress $msg "SUCCESS"
@@ -770,9 +801,9 @@ function Invoke-ExecuteCleanup {
     }
 
     return [PSCustomObject]@{
-        TotalFreedBytes = $freedBytes
-        DisplayFreed    = Format-Bytes -Bytes $freedBytes
-        DeletedCount    = $deletedCount
+        TotalFreedBytes = $totalFreedBytes
+        DisplayFreed    = Format-Bytes -Bytes $totalFreedBytes
+        DeletedCount    = $totalDeletedCount
         Logs            = $logMessages
     }
 }
