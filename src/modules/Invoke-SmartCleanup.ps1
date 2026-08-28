@@ -353,7 +353,10 @@ function Invoke-ExecuteCleanup {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [array]$SelectedItems
+        [array]$SelectedItems,
+
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$OnProgress = $null
     )
 
     $freedBytes = 0
@@ -363,13 +366,28 @@ function Invoke-ExecuteCleanup {
     foreach ($item in $SelectedItems) {
         if (-not $item.IsSelected) { continue }
 
+        if ($null -ne $OnProgress) {
+            & $OnProgress "Starting purge of $($item.CategoryName) ($($item.DisplaySize))..." "INFO"
+        }
+
         if ($item.Type -eq 'RecycleBin') {
             try {
+                if ($null -ne $OnProgress) {
+                    & $OnProgress "Clearing Windows Recycle Bin..." "INFO"
+                }
                 Clear-RecycleBin -Force -ErrorAction SilentlyContinue
                 $freedBytes += $item.RawBytes
-                $logMessages += "Emptied Recycle Bin (Freed $(Format-Bytes -Bytes $item.RawBytes))"
+                $msg = "Emptied Recycle Bin (Freed $(Format-Bytes -Bytes $item.RawBytes))"
+                $logMessages += $msg
+                if ($null -ne $OnProgress) {
+                    & $OnProgress $msg "SUCCESS"
+                }
             } catch {
-                $logMessages += "Notice: Empty Recycle Bin completed with warnings: $_"
+                $msg = "Notice: Recycle Bin purge completed with warnings: $_"
+                $logMessages += $msg
+                if ($null -ne $OnProgress) {
+                    & $OnProgress $msg "WARN"
+                }
             }
             continue
         }
@@ -381,17 +399,30 @@ function Invoke-ExecuteCleanup {
             $catDeleted = 0
 
             try {
-                Get-ChildItem -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                $itemsToClean = Get-ChildItem -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
+                $totalInCat = ($itemsToClean | Measure-Object).Count
+
+                foreach ($entry in $itemsToClean) {
                     try {
-                        if ($_.PSIsContainer) {
-                            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                        if ($entry.PSIsContainer) {
+                            Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction SilentlyContinue
                         } else {
-                            $len = $_.Length
-                            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                            $len = $entry.Length
+                            Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction SilentlyContinue
                             $catFreed += $len
                         }
                         $catDeleted++
+
+                        # Stream progress live to terminal every few items or on major steps
+                        if ($catDeleted % 5 -eq 0 -or $catDeleted -le 3 -or $catDeleted -eq $totalInCat) {
+                            if ($null -ne $OnProgress) {
+                                & $OnProgress "  [$catDeleted / $totalInCat] Cleaned: $($entry.Name)" "INFO"
+                            }
+                        }
                     } catch {}
+
+                    # UI Message pumping to prevent freezing
+                    try { [System.Windows.Forms.Application]::DoEvents() } catch {}
                 }
 
                 $deletedCount += $catDeleted
@@ -401,9 +432,17 @@ function Invoke-ExecuteCleanup {
                     $freedBytes += $initialSize
                 }
 
-                $logMessages += "Purged $($item.CategoryName): Cleaned $catDeleted items (Freed $(Format-Bytes -Bytes $initialSize))"
+                $msg = "Purged $($item.CategoryName): Cleaned $catDeleted items (Freed $(Format-Bytes -Bytes $initialSize))"
+                $logMessages += $msg
+                if ($null -ne $OnProgress) {
+                    & $OnProgress $msg "SUCCESS"
+                }
             } catch {
-                $logMessages += "Notice on $($item.CategoryName): $_"
+                $msg = "Notice on $($item.CategoryName): $_"
+                $logMessages += $msg
+                if ($null -ne $OnProgress) {
+                    & $OnProgress $msg "WARN"
+                }
             }
         }
     }
@@ -420,7 +459,10 @@ function Invoke-ExecuteCategoryCleanup {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$TargetId
+        [string]$TargetId,
+
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$OnProgress = $null
     )
 
     $targets = Scan-SmartCleanupItems
@@ -430,6 +472,6 @@ function Invoke-ExecuteCategoryCleanup {
     }
 
     $item.IsSelected = $true
-    $res = Invoke-ExecuteCleanup -SelectedItems @($item)
+    $res = Invoke-ExecuteCleanup -SelectedItems @($item) -OnProgress $OnProgress
     return $res
 }

@@ -675,7 +675,10 @@ function Invoke-ExecuteCleanup {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [array]$SelectedItems
+        [array]$SelectedItems,
+
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$OnProgress = $null
     )
 
     $freedBytes = 0
@@ -685,13 +688,28 @@ function Invoke-ExecuteCleanup {
     foreach ($item in $SelectedItems) {
         if (-not $item.IsSelected) { continue }
 
+        if ($null -ne $OnProgress) {
+            & $OnProgress "Starting purge of $($item.CategoryName) ($($item.DisplaySize))..." "INFO"
+        }
+
         if ($item.Type -eq 'RecycleBin') {
             try {
+                if ($null -ne $OnProgress) {
+                    & $OnProgress "Clearing Windows Recycle Bin..." "INFO"
+                }
                 Clear-RecycleBin -Force -ErrorAction SilentlyContinue
                 $freedBytes += $item.RawBytes
-                $logMessages += "Emptied Recycle Bin (Freed $(Format-Bytes -Bytes $item.RawBytes))"
+                $msg = "Emptied Recycle Bin (Freed $(Format-Bytes -Bytes $item.RawBytes))"
+                $logMessages += $msg
+                if ($null -ne $OnProgress) {
+                    & $OnProgress $msg "SUCCESS"
+                }
             } catch {
-                $logMessages += "Notice: Empty Recycle Bin completed with warnings: $_"
+                $msg = "Notice: Recycle Bin purge completed with warnings: $_"
+                $logMessages += $msg
+                if ($null -ne $OnProgress) {
+                    & $OnProgress $msg "WARN"
+                }
             }
             continue
         }
@@ -703,17 +721,30 @@ function Invoke-ExecuteCleanup {
             $catDeleted = 0
 
             try {
-                Get-ChildItem -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                $itemsToClean = Get-ChildItem -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
+                $totalInCat = ($itemsToClean | Measure-Object).Count
+
+                foreach ($entry in $itemsToClean) {
                     try {
-                        if ($_.PSIsContainer) {
-                            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                        if ($entry.PSIsContainer) {
+                            Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction SilentlyContinue
                         } else {
-                            $len = $_.Length
-                            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                            $len = $entry.Length
+                            Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction SilentlyContinue
                             $catFreed += $len
                         }
                         $catDeleted++
+
+                        # Stream progress live to terminal every few items or on major steps
+                        if ($catDeleted % 5 -eq 0 -or $catDeleted -le 3 -or $catDeleted -eq $totalInCat) {
+                            if ($null -ne $OnProgress) {
+                                & $OnProgress "  [$catDeleted / $totalInCat] Cleaned: $($entry.Name)" "INFO"
+                            }
+                        }
                     } catch {}
+
+                    # UI Message pumping to prevent freezing
+                    try { [System.Windows.Forms.Application]::DoEvents() } catch {}
                 }
 
                 $deletedCount += $catDeleted
@@ -723,9 +754,17 @@ function Invoke-ExecuteCleanup {
                     $freedBytes += $initialSize
                 }
 
-                $logMessages += "Purged $($item.CategoryName): Cleaned $catDeleted items (Freed $(Format-Bytes -Bytes $initialSize))"
+                $msg = "Purged $($item.CategoryName): Cleaned $catDeleted items (Freed $(Format-Bytes -Bytes $initialSize))"
+                $logMessages += $msg
+                if ($null -ne $OnProgress) {
+                    & $OnProgress $msg "SUCCESS"
+                }
             } catch {
-                $logMessages += "Notice on $($item.CategoryName): $_"
+                $msg = "Notice on $($item.CategoryName): $_"
+                $logMessages += $msg
+                if ($null -ne $OnProgress) {
+                    & $OnProgress $msg "WARN"
+                }
             }
         }
     }
@@ -742,7 +781,10 @@ function Invoke-ExecuteCategoryCleanup {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$TargetId
+        [string]$TargetId,
+
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$OnProgress = $null
     )
 
     $targets = Scan-SmartCleanupItems
@@ -752,7 +794,7 @@ function Invoke-ExecuteCategoryCleanup {
     }
 
     $item.IsSelected = $true
-    $res = Invoke-ExecuteCleanup -SelectedItems @($item)
+    $res = Invoke-ExecuteCleanup -SelectedItems @($item) -OnProgress $OnProgress
     return $res
 }
 
@@ -1435,22 +1477,36 @@ function Find-Control {
     return $window.FindName($Name)
 }
 
-# Console Logger Function
+# Live Console Logger Function (Streams to Terminal + GUI + Pumps Dispatcher)
 function Log-Console {
     param([string]$Message, [string]$Level = "INFO")
     $timestamp = (Get-Date).ToString("HH:mm:ss")
     $prefix = "[+]"
-    if ($Level -eq "SUCCESS") { $prefix = "[OK]" }
-    elseif ($Level -eq "WARN") { $prefix = "[!]" }
-    elseif ($Level -eq "ERROR") { $prefix = "[X]" }
+    $hostColor = "Cyan"
+    if ($Level -eq "SUCCESS") { $prefix = "[OK]"; $hostColor = "Green" }
+    elseif ($Level -eq "WARN") { $prefix = "[!]"; $hostColor = "Yellow" }
+    elseif ($Level -eq "ERROR") { $prefix = "[X]"; $hostColor = "Red" }
     
-    $logLine = "$timestamp $prefix $Message`r`n"
+    $logLine = "$timestamp $prefix $Message"
     
+    # 1. Real-time stream to Terminal console
+    try {
+        Write-Host "$timestamp " -NoNewline -ForegroundColor DarkGray
+        Write-Host "$prefix " -NoNewline -ForegroundColor $hostColor
+        Write-Host $Message -ForegroundColor White
+    } catch {}
+    
+    # 2. Append to in-app WPF Console Box
     $txtConsole = Find-Control "TxtConsoleLog"
     if ($txtConsole) {
-        $txtConsole.AppendText($logLine)
+        $txtConsole.AppendText("$logLine`r`n")
         $txtConsole.ScrollToEnd()
     }
+
+    # 3. Message pump to keep WPF UI responsive and prevent freezing
+    try {
+        [System.Windows.Forms.Application]::DoEvents()
+    } catch {}
 }
 
 # Control References
@@ -1667,7 +1723,6 @@ $btnInspectCatFiles.add_Click({
         return
     }
     
-    # Match in dropdown
     for ($i = 0; $i -lt $cmbInspectTarget.Items.Count; $i++) {
         if ($cmbInspectTarget.Items[$i] -like "$($sel.Id)*") {
             $cmbInspectTarget.SelectedIndex = $i
@@ -1675,13 +1730,11 @@ $btnInspectCatFiles.add_Click({
         }
     }
     
-    # Switch tab to File Inspector (Index 1)
     $mainTabControl.SelectedIndex = 1
-    # Trigger load files
     $btnRefreshInspectFiles.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
 })
 
-# 3. Action: Clean Selected Junk (Bulk)
+# 3. Action: Clean Selected Junk (Bulk with Live Streaming Progress)
 $btnRunCleanup.add_Click({
     $targetsToClean = @()
     foreach ($item in $global:ScannedCleanupItems) {
@@ -1697,22 +1750,33 @@ $btnRunCleanup.add_Click({
 
     $totalBytes = ($targetsToClean | Measure-Object -Property RawBytes -Sum).Sum
     $confirm = [System.Windows.MessageBox]::Show(
-        "Proceed with cleaning $(Format-Bytes -Bytes $totalBytes) across $($targetsToClean.Count) selected C: drive junk categories?`n`nDiskman will safely remove unnecessary cache files and purge trash.",
+        "Proceed with cleaning $(Format-Bytes -Bytes $totalBytes) across $($targetsToClean.Count) selected C: drive junk categories?`n`nDiskman will safely remove unnecessary cache files and purge trash.`n`nReal-time deletion progress will stream live to the terminal window and activity log.",
         "Confirm C: Drive Cleanup",
         [System.Windows.MessageBoxButton]::YesNo,
         [System.Windows.MessageBoxImage]::Warning
     )
 
     if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
-        Log-Console "Executing C: Drive cleanup sequence..."
-        $res = Invoke-ExecuteCleanup -SelectedItems $targetsToClean
-        foreach ($log in $res.Logs) {
-            Log-Console $log "SUCCESS"
+        Log-Console "=========================================================="
+        Log-Console "EXECUTING C: DRIVE CLEANUP PIPELINE"
+        Log-Console "Total Selected Space: $(Format-Bytes -Bytes $totalBytes) ($($targetsToClean.Count) categories)"
+        Log-Console "=========================================================="
+        
+        $btnRunCleanup.IsEnabled = $false
+        $txtGlobalStat.Text = "Cleaning C: Drive in progress... (Live logs in terminal)"
+        
+        $res = Invoke-ExecuteCleanup -SelectedItems $targetsToClean -OnProgress {
+            param($msg, $level)
+            Log-Console $msg $level
         }
-        Log-Console "Cleanup finished! Total space freed: $($res.DisplayFreed) ($($res.DeletedCount) items purged)" "SUCCESS"
+        
+        $btnRunCleanup.IsEnabled = $true
+        Log-Console "==========================================================" "SUCCESS"
+        Log-Console "CLEANUP FINISHED! Total space freed: $($res.DisplayFreed) ($($res.DeletedCount) items purged)" "SUCCESS"
+        Log-Console "==========================================================" "SUCCESS"
         
         [System.Windows.MessageBox]::Show(
-            "C: Drive Cleanup Complete!`n`nFreed Space: $($res.DisplayFreed)`nPurged Items: $($res.DeletedCount)",
+            "C: Drive Cleanup Complete!`n`nFreed Space: $($res.DisplayFreed)`nPurged Items: $($res.DeletedCount)`n`nSee Terminal window for full execution logs.",
             "Diskman - C: Drive Cleaned",
             [System.Windows.MessageBoxButton]::OK,
             [System.Windows.MessageBoxImage]::Information
@@ -1744,11 +1808,15 @@ $btnCleanSingleCategory.add_Click({
     )
 
     if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
-        Log-Console "Purging category: $($sel.CategoryName)..."
-        $res = Invoke-ExecuteCategoryCleanup -TargetId $sel.Id
-        foreach ($log in $res.Logs) {
-            Log-Console $log "SUCCESS"
+        Log-Console "Purging single category: $($sel.CategoryName)..."
+        $btnCleanSingleCategory.IsEnabled = $false
+        
+        $res = Invoke-ExecuteCategoryCleanup -TargetId $sel.Id -OnProgress {
+            param($msg, $level)
+            Log-Console $msg $level
         }
+        
+        $btnCleanSingleCategory.IsEnabled = $true
         [System.Windows.MessageBox]::Show(
             "Category Cleaned: $($sel.CategoryName)`nFreed Space: $($res.DisplayFreed)",
             "Diskman",
@@ -1832,7 +1900,10 @@ $btnPurgeAllInspect.add_Click({
         [System.Windows.MessageBoxImage]::Warning
     )
     if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
-        $res = Invoke-ExecuteCategoryCleanup -TargetId $targetId
+        $res = Invoke-ExecuteCategoryCleanup -TargetId $targetId -OnProgress {
+            param($msg, $level)
+            Log-Console $msg $level
+        }
         Log-Console "Cleared category: $targetId (Freed: $($res.DisplayFreed))" "SUCCESS"
         $btnRefreshInspectFiles.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Update-CDriveMetricsDisplay
@@ -1970,9 +2041,10 @@ $btnTopQuickScan.add_Click({
 })
 $btnScanClean.add_Click({ Start-ScanCJunk })
 
-# Initial Startup
+# Initial Startup Banner in Terminal & UI
 Log-Console "=========================================================="
-Log-Console "Diskman - Dedicated C: Drive Trash & Storage Cleaner ready."
+Log-Console "DISKMAN - C: DRIVE STORAGE CLEANER & JUNK PURGER"
+Log-Console "Real-time activity and deletion logs will stream live below."
 Log-Console "Zero external dependencies | PowerShell + WPF Native Engine"
 Log-Console "=========================================================="
 
