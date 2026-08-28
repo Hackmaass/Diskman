@@ -53,6 +53,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = '100% Safe'
             Recommended = $true
+            RequiresAdmin = $false
         },
         @{
             Id          = 'SystemTemp'
@@ -64,6 +65,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = '100% Safe'
             Recommended = $true
+            RequiresAdmin = $true
         },
         @{
             Id          = 'WinUpdateCache'
@@ -75,6 +77,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = '100% Safe'
             Recommended = $true
+            RequiresAdmin = $true
         },
         @{
             Id          = 'DeliveryOpt'
@@ -86,6 +89,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = '100% Safe'
             Recommended = $true
+            RequiresAdmin = $true
         },
         @{
             Id          = 'CrashDumps'
@@ -97,6 +101,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = '100% Safe'
             Recommended = $true
+            RequiresAdmin = $false
         },
         @{
             Id          = 'WERLogs'
@@ -108,6 +113,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = '100% Safe'
             Recommended = $true
+            RequiresAdmin = $false
         },
         @{
             Id          = 'CbsLogs'
@@ -119,6 +125,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = '100% Safe'
             Recommended = $true
+            RequiresAdmin = $true
         },
         @{
             Id          = 'DismLogs'
@@ -130,6 +137,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = '100% Safe'
             Recommended = $true
+            RequiresAdmin = $true
         },
         @{
             Id          = 'PipCache'
@@ -141,6 +149,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = 'Safe'
             Recommended = $true
+            RequiresAdmin = $false
         },
         @{
             Id          = 'NpmCache'
@@ -152,6 +161,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = 'Safe'
             Recommended = $true
+            RequiresAdmin = $false
         },
         @{
             Id          = 'YarnCache'
@@ -163,6 +173,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = 'Safe'
             Recommended = $true
+            RequiresAdmin = $false
         },
         @{
             Id          = 'NugetCache'
@@ -174,6 +185,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = 'Optional'
             Recommended = $false
+            RequiresAdmin = $false
         },
         @{
             Id          = 'ChromeCache'
@@ -185,6 +197,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = 'Safe'
             Recommended = $true
+            RequiresAdmin = $false
         },
         @{
             Id          = 'EdgeCache'
@@ -196,6 +209,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = 'Safe'
             Recommended = $true
+            RequiresAdmin = $false
         },
         @{
             Id          = 'BraveCache'
@@ -207,6 +221,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = 'Safe'
             Recommended = $false
+            RequiresAdmin = $false
         },
         @{
             Id          = 'DiscordCache'
@@ -218,6 +233,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = 'Safe'
             Recommended = $true
+            RequiresAdmin = $false
         },
         @{
             Id          = 'SpotifyCache'
@@ -229,6 +245,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = 'Safe'
             Recommended = $false
+            RequiresAdmin = $false
         },
         @{
             Id          = 'VsCodeCache'
@@ -240,6 +257,7 @@ function Get-CleanableTargets {
             Type        = 'DirectoryContents'
             SafetyLevel = 'Safe'
             Recommended = $true
+            RequiresAdmin = $false
         },
         @{
             Id          = 'RecycleBin'
@@ -251,6 +269,7 @@ function Get-CleanableTargets {
             Type        = 'RecycleBin'
             SafetyLevel = 'Safe'
             Recommended = $true
+            RequiresAdmin = $false
         }
     )
 
@@ -285,22 +304,23 @@ function Scan-SmartCleanupItems {
         $isSelected = ($t.Recommended -and $rawBytes -gt 0)
 
         $results += [PSCustomObject]@{
-            Id           = $t.Id
-            Group        = $t.Group
-            CategoryName = $t.Category
-            Icon         = $t.Icon
-            DisplayName  = $t.Category
-            Target       = $t.Path
-            Type         = $t.Type
-            SafetyLevel  = $t.SafetyLevel
-            RawBytes     = [long]$rawBytes
-            DisplaySize  = $disp
-            FileCount    = "$fileCount items"
-            RawCount     = [int]$fileCount
-            Description  = $t.Description
-            Recommended  = [bool]$t.Recommended
-            IsSelected   = [bool]$isSelected
-            PathExists   = [bool]$pathExists
+            Id            = $t.Id
+            Group         = $t.Group
+            CategoryName  = $t.Category
+            Icon          = $t.Icon
+            DisplayName   = $t.Category
+            Target        = $t.Path
+            Type          = $t.Type
+            SafetyLevel   = $t.SafetyLevel
+            RawBytes      = [long]$rawBytes
+            DisplaySize   = $disp
+            FileCount     = "$fileCount items"
+            RawCount      = [int]$fileCount
+            Description   = $t.Description
+            Recommended   = [bool]$t.Recommended
+            RequiresAdmin = [bool]$t.RequiresAdmin
+            IsSelected    = [bool]$isSelected
+            PathExists    = [bool]$pathExists
         }
     }
 
@@ -370,6 +390,27 @@ function Invoke-ExecuteCleanup {
             & $OnProgress "Starting purge of $($item.CategoryName) ($($item.DisplaySize))..." "INFO"
         }
 
+        # Handle Windows Services file locks
+        $restartedServices = @()
+        if ($item.Id -eq 'WinUpdateCache') {
+            if ($null -ne $OnProgress) {
+                & $OnProgress "  -> Temporarily releasing Windows Update service lock (wuauserv)..." "INFO"
+            }
+            try {
+                Stop-Service -Name "wuauserv" -Force -ErrorAction SilentlyContinue
+                $restartedServices += "wuauserv"
+            } catch {}
+            try {
+                Stop-Service -Name "bits" -Force -ErrorAction SilentlyContinue
+                $restartedServices += "bits"
+            } catch {}
+        } elseif ($item.Id -eq 'DeliveryOpt') {
+            try {
+                Stop-Service -Name "DoSvc" -Force -ErrorAction SilentlyContinue
+                $restartedServices += "DoSvc"
+            } catch {}
+        }
+
         if ($item.Type -eq 'RecycleBin') {
             try {
                 if ($null -ne $OnProgress) {
@@ -410,23 +451,51 @@ function Invoke-ExecuteCleanup {
 
                     try {
                         if ($entry.PSIsContainer) {
-                            # Measure container size before fast deletion
                             $entryBytes = (Get-FolderSizeFast -Path $entry.FullName).RawBytes
+                            
+                            # Remove readonly attributes if present
+                            try {
+                                $attr = [System.IO.File]::GetAttributes($entry.FullName)
+                                if ($attr -band [System.IO.FileAttributes]::ReadOnly) {
+                                    [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
+                                }
+                            } catch {}
+
                             try {
                                 [System.IO.Directory]::Delete($entry.FullName, $true)
                                 $entryDeleted = $true
                             } catch {
-                                Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
-                                $entryDeleted = $true
+                                # Fallback 1: cmd rmdir
+                                try {
+                                    cmd.exe /c "rmdir /s /q `"$($entry.FullName)`"" 2>$null
+                                    if (-not (Test-Path -LiteralPath $entry.FullName)) {
+                                        $entryDeleted = $true
+                                    }
+                                } catch {}
+
+                                # Fallback 2: PowerShell Remove-Item
+                                if (-not $entryDeleted) {
+                                    try {
+                                        Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+                                        $entryDeleted = $true
+                                    } catch {}
+                                }
                             }
                         } else {
                             $entryBytes = [long]$entry.Length
+                            
+                            try {
+                                [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
+                            } catch {}
+
                             try {
                                 [System.IO.File]::Delete($entry.FullName)
                                 $entryDeleted = $true
                             } catch {
-                                Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
-                                $entryDeleted = $true
+                                try {
+                                    Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
+                                    $entryDeleted = $true
+                                } catch {}
                             }
                         }
 
@@ -434,23 +503,32 @@ function Invoke-ExecuteCleanup {
                             $catDeletedCount++
                             $catFreedBytes += $entryBytes
 
-                            # Stream live progress every few items
                             if ($catDeletedCount % 5 -eq 0 -or $catDeletedCount -le 3 -or $catDeletedCount -eq $totalInCat) {
                                 if ($null -ne $OnProgress) {
                                     & $OnProgress "  [$catDeletedCount / $totalInCat] Cleaned: $($entry.Name)" "INFO"
                                 }
                             }
+                        } else {
+                            $catSkippedCount++
                         }
                     } catch {
-                        # Locked file or permission denial
                         $catSkippedCount++
                     }
 
-                    # UI Message pumping to prevent freezing
                     try { [System.Windows.Forms.Application]::DoEvents() } catch {}
                 }
 
-                # If individual sizes couldn't be summed but items were deleted, use initialCategoryBytes
+                # Restart services if stopped
+                foreach ($svc in $restartedServices) {
+                    try {
+                        Start-Service -Name $svc -ErrorAction SilentlyContinue
+                        if ($null -ne $OnProgress) {
+                            & $OnProgress "  -> Restored service $svc" "INFO"
+                        }
+                    } catch {}
+                }
+
+                # If individual sizes couldn't be measured individually but items were removed, fall back
                 if ($catFreedBytes -le 0 -and $catDeletedCount -gt 0) {
                     $catFreedBytes = $initialCategoryBytes
                 }

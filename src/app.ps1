@@ -311,6 +311,11 @@ $btnRunCleanup.add_Click({
         Log-Console "=========================================================="
         Log-Console "EXECUTING C: DRIVE CLEANUP PIPELINE"
         Log-Console "Total Selected Space: $(Format-Bytes -Bytes $totalBytes) ($($targetsToClean.Count) categories)"
+        
+        $hasAdminTargets = ($targetsToClean | Where-Object { $_.RequiresAdmin -eq $true }).Count -gt 0
+        if ($hasAdminTargets -and -not $isAdmin) {
+            Log-Console "Notice: Selected system items require Administrator rights. Run via run.bat (Admin) if locked items are skipped." "WARN"
+        }
         Log-Console "=========================================================="
         
         $btnRunCleanup.IsEnabled = $false
@@ -593,10 +598,16 @@ $btnTopQuickScan.add_Click({
 $btnScanClean.add_Click({ Start-ScanCJunk })
 
 # Initial Startup Banner in Terminal & UI
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
 Log-Console "=========================================================="
 Log-Console "DISKMAN - C: DRIVE STORAGE CLEANER & JUNK PURGER"
 Log-Console "Real-time activity and deletion logs will stream live below."
-Log-Console "Zero external dependencies | PowerShell + WPF Native Engine"
+if ($isAdmin) {
+    Log-Console "Elevated Administrator Mode active [Full Access]" "SUCCESS"
+} else {
+    Log-Console "Standard Mode: Run as Administrator to purge Windows Update & System Cache" "WARN"
+}
 Log-Console "=========================================================="
 
 Update-CDriveMetricsDisplay
