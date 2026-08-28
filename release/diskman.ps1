@@ -484,6 +484,9 @@ function Get-CleanableTargets {
     $userProfile  = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 
     $targets = @(
+        # ==========================================
+        # 1. WINDOWS & SYSTEM TARGETS
+        # ==========================================
         @{
             Id          = 'UserTemp'
             Group       = 'Windows & System'
@@ -580,6 +583,170 @@ function Get-CleanableTargets {
             Recommended = $true
             RequiresAdmin = $true
         },
+
+        # ==========================================
+        # 2. GAMING & GPU SHADER CACHES (HEAVY SPACE SAVERS)
+        # ==========================================
+        @{
+            Id          = 'NvidiaDxCache'
+            Group       = 'Gaming & GPU'
+            Category    = 'NVIDIA DirectX Shader Cache (DXCache)'
+            Icon        = '[GPU]'
+            Path        = (Join-Path $localAppData 'NVIDIA\DXCache')
+            Description = 'Compiled DirectX game shader cache. Rebuilt dynamically by NVIDIA GPU driver.'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'NvidiaGlCache'
+            Group       = 'Gaming & GPU'
+            Category    = 'NVIDIA OpenGL/Vulkan Cache (GLCache)'
+            Icon        = '[GPU]'
+            Path        = (Join-Path $localAppData 'NVIDIA\GLCache')
+            Description = 'Compiled OpenGL and Vulkan game shader cache from NVIDIA GPU'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'DirectXShaderCache'
+            Group       = 'Gaming & GPU'
+            Category    = 'Windows DirectX Shader Cache (D3DSCache)'
+            Icon        = '[GPU]'
+            Path        = (Join-Path $localAppData 'D3DSCache')
+            Description = 'Global Windows DirectX shader cache shared across game titles'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'AmdDxCache'
+            Group       = 'Gaming & GPU'
+            Category    = 'AMD Radeon Shader Cache'
+            Icon        = '[GPU]'
+            Path        = (Join-Path $localAppData 'AMD\DxCache')
+            Description = 'Compiled game shader cache for AMD Radeon graphics cards'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'IntelShaderCache'
+            Group       = 'Gaming & GPU'
+            Category    = 'Intel Graphics Shader Cache'
+            Icon        = '[GPU]'
+            Path        = (Join-Path $localAppData 'Intel\ShaderCache')
+            Description = 'Compiled game shader cache for Intel Arc and Iris graphics'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'SteamWebCache'
+            Group       = 'Gaming & GPU'
+            Category    = 'Steam Web & HTTP Cache'
+            Icon        = '[STEAM]'
+            Path        = (Join-Path $localAppData 'Steam\htmlcache')
+            Description = 'Cached store web assets, media thumbnails, and browser cache in Steam'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'EpicGamesCache'
+            Group       = 'Gaming & GPU'
+            Category    = 'Epic Games Launcher Cache'
+            Icon        = '[EPIC]'
+            Path        = (Join-Path $localAppData 'EpicGamesLauncher\Saved\webcache')
+            Description = 'Cached store assets and web interface data in Epic Games Launcher'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'EaAppCache'
+            Group       = 'Gaming & GPU'
+            Category    = 'EA Desktop / Origin Cache'
+            Icon        = '[EA]'
+            Path        = (Join-Path $localAppData 'Electronic Arts\EA Desktop\Cache')
+            Description = 'Cached game store artwork and web data in EA Desktop'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'UbisoftCache'
+            Group       = 'Gaming & GPU'
+            Category    = 'Ubisoft Connect Cache'
+            Icon        = '[UBI]'
+            Path        = (Join-Path $localAppData 'Ubisoft Game Launcher\cache')
+            Description = 'Cached client assets and avatars in Ubisoft Connect Launcher'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'BattlenetCache'
+            Group       = 'Gaming & GPU'
+            Category    = 'Battle.net / Blizzard Agent Cache'
+            Icon        = '[BNET]'
+            Path        = 'C:\ProgramData\Battle.net\Agent\data\cache'
+            Description = 'Battle.net Agent patcher and installer cached metadata'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
+            RequiresAdmin = $true
+        },
+        @{
+            Id          = 'RiotClientLogs'
+            Group       = 'Gaming & GPU'
+            Category    = 'Riot Games Client Logs'
+            Icon        = '[RIOT]'
+            Path        = (Join-Path $localAppData 'Riot Games\Riot Client\Logs')
+            Description = 'Historical log dumps from Riot Client (League of Legends, Valorant)'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'UnrealEngineDdc'
+            Group       = 'Gaming & GPU'
+            Category    = 'Unreal Engine Derived Data Cache (DDC)'
+            Icon        = '[UE]'
+            Path        = (Join-Path $localAppData 'UnrealEngine\Common\DerivedDataCache')
+            Description = 'Derived data cache for Unreal Engine 4 and 5 game compilations'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'UnityCache'
+            Group       = 'Gaming & GPU'
+            Category    = 'Unity Editor & Asset Cache'
+            Icon        = '[UNITY]'
+            Path        = (Join-Path $localAppData 'Unity\cache')
+            Description = 'Downloaded package and asset store caches for Unity games'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+
+        # ==========================================
+        # 3. DEVELOPER CACHES
+        # ==========================================
         @{
             Id          = 'PipCache'
             Group       = 'Developer Caches'
@@ -629,6 +796,34 @@ function Get-CleanableTargets {
             RequiresAdmin = $false
         },
         @{
+            Id          = 'GradleCache'
+            Group       = 'Developer Caches'
+            Category    = 'Gradle Build Cache'
+            Icon        = '[GRADLE]'
+            Path        = (Join-Path $userProfile '.gradle\caches')
+            Description = 'Downloaded jar artifacts and distribution zip caches in Gradle'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $false
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'CargoCache'
+            Group       = 'Developer Caches'
+            Category    = 'Rust Cargo Registry Cache'
+            Icon        = '[CARGO]'
+            Path        = (Join-Path $userProfile '.cargo\registry\cache')
+            Description = 'Cached Rust crate archive files'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $false
+            RequiresAdmin = $false
+        },
+
+        # ==========================================
+        # 4. BROWSER & MEDIA APPLICATION CACHES
+        # ==========================================
+        @{
             Id          = 'ChromeCache'
             Group       = 'Browser & App Caches'
             Category    = 'Google Chrome Web Cache'
@@ -667,7 +862,7 @@ function Get-CleanableTargets {
         @{
             Id          = 'DiscordCache'
             Group       = 'Browser & App Caches'
-            Category    = 'Discord App Cache'
+            Category    = 'Discord App Media Cache'
             Icon        = '[DISCORD]'
             Path        = (Join-Path $appData 'discord\Cache')
             Description = 'Cached Discord media, avatars, and attachments'
@@ -700,6 +895,34 @@ function Get-CleanableTargets {
             Recommended = $true
             RequiresAdmin = $false
         },
+        @{
+            Id          = 'AdobeMediaCache'
+            Group       = 'Browser & App Caches'
+            Category    = 'Adobe Premiere Media Cache'
+            Icon        = '[ADOBE]'
+            Path        = (Join-Path $appData 'Adobe\Common\Media Cache Files')
+            Description = 'Cached video peak files, conformed audio, and render frames in Adobe CC'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $true
+            RequiresAdmin = $false
+        },
+        @{
+            Id          = 'TelegramCache'
+            Group       = 'Browser & App Caches'
+            Category    = 'Telegram Desktop Media Cache'
+            Icon        = '[TELEGRAM]'
+            Path        = (Join-Path $appData 'Telegram Desktop\tdata\user_data\media_cache')
+            Description = 'Locally cached stickers, images, and voice notes in Telegram'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $false
+            RequiresAdmin = $false
+        },
+
+        # ==========================================
+        # 5. RECYCLE BIN
+        # ==========================================
         @{
             Id          = 'RecycleBin'
             Group       = 'Recycle Bin'
@@ -1600,10 +1823,11 @@ $embeddedXaml = @'
 
                             <!-- Filter Chips -->
                             <TextBlock Text="Filter:" Foreground="#71717A" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11"/>
-                            <Button x:Name="BtnFilterAll" Content="All" Margin="0,0,4,0" Padding="10,5" FontSize="11"/>
-                            <Button x:Name="BtnFilterSystem" Content="System &amp; Temp" Margin="0,0,4,0" Padding="10,5" FontSize="11"/>
-                            <Button x:Name="BtnFilterDev" Content="Developer" Margin="0,0,4,0" Padding="10,5" FontSize="11"/>
-                            <Button x:Name="BtnFilterBrowser" Content="Browser &amp; Apps" Margin="0,0,4,0" Padding="10,5" FontSize="11"/>
+                            <Button x:Name="BtnFilterAll" Content="All" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
+                            <Button x:Name="BtnFilterSystem" Content="System" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
+                            <Button x:Name="BtnFilterGaming" Content="Gaming &amp; GPU" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
+                            <Button x:Name="BtnFilterDev" Content="Developer" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
+                            <Button x:Name="BtnFilterBrowser" Content="Apps &amp; Web" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
                         </StackPanel>
 
                         <!-- Right Scan & Clean Buttons -->
@@ -1881,6 +2105,7 @@ $btnSelectAll              = Find-Control "BtnSelectAll"
 $btnClearSel               = Find-Control "BtnClearSelection"
 $btnFilterAll              = Find-Control "BtnFilterAll"
 $btnFilterSys              = Find-Control "BtnFilterSystem"
+$btnFilterGaming           = Find-Control "BtnFilterGaming"
 $btnFilterDev              = Find-Control "BtnFilterDev"
 $btnFilterBrowser          = Find-Control "BtnFilterBrowser"
 $txtCleanBadge             = Find-Control "TxtCleanSelectedBadge"
@@ -2030,6 +2255,7 @@ $btnClearSel.add_Click({
 # Filter Chips
 $btnFilterAll.add_Click({ Apply-CleanupFilter "All" })
 $btnFilterSys.add_Click({ Apply-CleanupFilter "Windows & System" })
+$btnFilterGaming.add_Click({ Apply-CleanupFilter "Gaming" })
 $btnFilterDev.add_Click({ Apply-CleanupFilter "Developer" })
 $btnFilterBrowser.add_Click({ Apply-CleanupFilter "Browser" })
 

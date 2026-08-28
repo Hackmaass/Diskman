@@ -82,6 +82,7 @@ $btnSelectAll              = Find-Control "BtnSelectAll"
 $btnClearSel               = Find-Control "BtnClearSelection"
 $btnFilterAll              = Find-Control "BtnFilterAll"
 $btnFilterSys              = Find-Control "BtnFilterSystem"
+$btnFilterGaming           = Find-Control "BtnFilterGaming"
 $btnFilterDev              = Find-Control "BtnFilterDev"
 $btnFilterBrowser          = Find-Control "BtnFilterBrowser"
 $txtCleanBadge             = Find-Control "TxtCleanSelectedBadge"
@@ -231,6 +232,7 @@ $btnClearSel.add_Click({
 # Filter Chips
 $btnFilterAll.add_Click({ Apply-CleanupFilter "All" })
 $btnFilterSys.add_Click({ Apply-CleanupFilter "Windows & System" })
+$btnFilterGaming.add_Click({ Apply-CleanupFilter "Gaming" })
 $btnFilterDev.add_Click({ Apply-CleanupFilter "Developer" })
 $btnFilterBrowser.add_Click({ Apply-CleanupFilter "Browser" })
 

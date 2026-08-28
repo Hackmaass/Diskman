@@ -392,10 +392,11 @@
 
                             <!-- Filter Chips -->
                             <TextBlock Text="Filter:" Foreground="#71717A" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11"/>
-                            <Button x:Name="BtnFilterAll" Content="All" Margin="0,0,4,0" Padding="10,5" FontSize="11"/>
-                            <Button x:Name="BtnFilterSystem" Content="System &amp; Temp" Margin="0,0,4,0" Padding="10,5" FontSize="11"/>
-                            <Button x:Name="BtnFilterDev" Content="Developer" Margin="0,0,4,0" Padding="10,5" FontSize="11"/>
-                            <Button x:Name="BtnFilterBrowser" Content="Browser &amp; Apps" Margin="0,0,4,0" Padding="10,5" FontSize="11"/>
+                            <Button x:Name="BtnFilterAll" Content="All" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
+                            <Button x:Name="BtnFilterSystem" Content="System" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
+                            <Button x:Name="BtnFilterGaming" Content="Gaming &amp; GPU" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
+                            <Button x:Name="BtnFilterDev" Content="Developer" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
+                            <Button x:Name="BtnFilterBrowser" Content="Apps &amp; Web" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
                         </StackPanel>
 
                         <!-- Right Scan & Clean Buttons -->
