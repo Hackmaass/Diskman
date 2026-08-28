@@ -436,6 +436,17 @@ function Invoke-ExecuteCleanup {
 
         $targetPath = $item.Target
         if (Test-Path -LiteralPath $targetPath) {
+            # Double-check safety guard on the target root
+            $targetSafety = Test-PathSafety -Path $targetPath
+            if (-not $targetSafety.Safe -and $targetPath -notlike "C:\Windows\SoftwareDistribution\*" -and $targetPath -notlike "C:\Windows\Temp*" -and $targetPath -notlike "C:\Windows\Logs\*") {
+                $msg = "BLOCKED: Target directory failed safety check: $($targetSafety.Reason)"
+                $logMessages += $msg
+                if ($null -ne $OnProgress) {
+                    & $OnProgress $msg "ERROR"
+                }
+                continue
+            }
+
             $initialCategoryBytes = $item.RawBytes
             $catFreedBytes = [long]0
             $catDeletedCount = 0
@@ -446,6 +457,16 @@ function Invoke-ExecuteCleanup {
                 $totalInCat = ($itemsToClean | Measure-Object).Count
 
                 foreach ($entry in $itemsToClean) {
+                    # Rigorous safety validation on every single item
+                    $itemSafety = Test-PathSafety -Path $entry.FullName
+                    if (-not $itemSafety.Safe) {
+                        $catSkippedCount++
+                        if ($null -ne $OnProgress) {
+                            & $OnProgress "  [SAFETY GUARD] Skipped protected item: $($entry.Name) ($($itemSafety.Reason))" "WARN"
+                        }
+                        continue
+                    }
+
                     $entryBytes = [long]0
                     $entryDeleted = $false
 
@@ -453,7 +474,6 @@ function Invoke-ExecuteCleanup {
                         if ($entry.PSIsContainer) {
                             $entryBytes = (Get-FolderSizeFast -Path $entry.FullName).RawBytes
                             
-                            # Remove readonly attributes if present
                             try {
                                 $attr = [System.IO.File]::GetAttributes($entry.FullName)
                                 if ($attr -band [System.IO.FileAttributes]::ReadOnly) {
@@ -518,7 +538,7 @@ function Invoke-ExecuteCleanup {
                     try { [System.Windows.Forms.Application]::DoEvents() } catch {}
                 }
 
-                # Restart services if stopped
+                # Restore services if paused
                 foreach ($svc in $restartedServices) {
                     try {
                         Start-Service -Name $svc -ErrorAction SilentlyContinue
@@ -528,7 +548,6 @@ function Invoke-ExecuteCleanup {
                     } catch {}
                 }
 
-                # If individual sizes couldn't be measured individually but items were removed, fall back
                 if ($catFreedBytes -le 0 -and $catDeletedCount -gt 0) {
                     $catFreedBytes = $initialCategoryBytes
                 }
@@ -539,7 +558,7 @@ function Invoke-ExecuteCleanup {
                 $freedFormatted = Format-Bytes -Bytes $catFreedBytes
                 $msg = "Purged $($item.CategoryName): Cleaned $catDeletedCount items (Freed $freedFormatted)"
                 if ($catSkippedCount -gt 0) {
-                    $msg += " [$catSkippedCount locked items skipped]"
+                    $msg += " [$catSkippedCount locked/protected items skipped]"
                 }
 
                 $logMessages += $msg

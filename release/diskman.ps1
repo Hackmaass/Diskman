@@ -29,6 +29,111 @@ function Format-Bytes {
     }
 }
 
+function Test-PathSafety {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return @{ Safe = $false; Reason = "Path is empty or null." }
+    }
+
+    $normalized = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+
+    # 1. Block Drive Roots (e.g., C:, C:\, D:\)
+    if ($normalized -match '^[A-Za-z]:$') {
+        return @{ Safe = $false; Reason = "Drive roots cannot be deleted." }
+    }
+
+    # 2. Block Critical Windows Operating System Roots
+    $blockedExactRoots = @(
+        "C:\Windows",
+        "C:\Windows\System32",
+        "C:\Windows\SysWOW64",
+        "C:\Windows\WinSxS",
+        "C:\Windows\SystemApps",
+        "C:\Windows\Boot",
+        "C:\Windows\inf",
+        "C:\Windows\Fonts",
+        "C:\Windows\assembly",
+        "C:\Windows\Microsoft.NET",
+        "C:\Program Files",
+        "C:\Program Files (x86)",
+        "C:\ProgramData",
+        "C:\Users",
+        "C:\Recovery",
+        "C:\System Volume Information"
+    )
+
+    foreach ($blocked in $blockedExactRoots) {
+        if ($normalized -ieq $blocked.TrimEnd('\')) {
+            return @{ Safe = $false; Reason = "Path is a protected system root ($blocked)." }
+        }
+    }
+
+    # 3. Block User Personal Data Folders (Desktop, Documents, Pictures, Videos, Music)
+    $userProfile = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile).TrimEnd('\')
+    $blockedUserFolders = @(
+        $userProfile,
+        (Join-Path $userProfile "Desktop"),
+        (Join-Path $userProfile "Documents"),
+        (Join-Path $userProfile "Pictures"),
+        (Join-Path $userProfile "Videos"),
+        (Join-Path $userProfile "Music"),
+        (Join-Path $userProfile "Contacts"),
+        (Join-Path $userProfile "Favorites"),
+        (Join-Path $userProfile "Saved Games"),
+        (Join-Path $userProfile "OneDrive")
+    )
+
+    foreach ($uFolder in $blockedUserFolders) {
+        if ($normalized -ieq $uFolder) {
+            return @{ Safe = $false; Reason = "Path is a protected user personal data directory ($uFolder)." }
+        }
+    }
+
+    # 4. Block Critical System Boot & Virtual Memory Files
+    $fileName = [System.IO.Path]::GetFileName($normalized)
+    $blockedSystemFiles = @(
+        "pagefile.sys",
+        "swapfile.sys",
+        "hiberfil.sys",
+        "bootmgr",
+        "bootstat.dat",
+        "BCD",
+        "NTUSER.DAT",
+        "UsrClass.dat"
+    )
+
+    if ($fileName -in $blockedSystemFiles) {
+        return @{ Safe = $false; Reason = "Protected Windows system kernel/boot file ($fileName)." }
+    }
+
+    # 5. Block Browser Sensitive Files (Passwords, Cookies, History, Bookmarks)
+    $blockedBrowserFiles = @(
+        "Login Data",
+        "Login Data-journal",
+        "Cookies",
+        "Cookies-journal",
+        "History",
+        "History-journal",
+        "Bookmarks",
+        "Bookmarks.bak",
+        "Preferences",
+        "Secure Preferences",
+        "Web Data",
+        "Local State"
+    )
+
+    if ($fileName -in $blockedBrowserFiles) {
+        return @{ Safe = $false; Reason = "Protected user browser profile data ($fileName)." }
+    }
+
+    return @{ Safe = $true; Reason = "OK" }
+}
+
 
 # --- Module: Find-LargeFiles.ps1 ---
 function Find-LargeFiles {
@@ -72,7 +177,7 @@ function Find-LargeFiles {
         $scannedFolders++
 
         # Skip system protected folders
-        if ($currentDir -match '\\\$RECYCLE\.BIN|\\System Volume Information|\\AppData\\Local\\Application Data|\\Windows\\WinSxS|\\Windows\\System32') {
+        if ($currentDir -match '\\\$RECYCLE\.BIN|\\System Volume Information|\\AppData\\Local\\Application Data|\\Windows\\WinSxS|\\Windows\\System32|\\Windows\\SysWOW64|\\Windows\\SystemApps|\\Windows\\assembly') {
             continue
         }
 
@@ -83,6 +188,10 @@ function Find-LargeFiles {
             $files = $dInfo.GetFiles()
             foreach ($f in $files) {
                 if ($f.Length -ge $MinSizeBytes) {
+                    # Safety check on file
+                    $safety = Test-PathSafety -Path $f.FullName
+                    if (-not $safety.Safe) { continue }
+
                     $ext = $f.Extension.ToLower()
                     $cat = "Other File"
 
@@ -116,7 +225,6 @@ function Find-LargeFiles {
                 $dirQueue.Enqueue($sub.FullName)
             }
         } catch {
-            # Skip unauthorized folders quietly
             continue
         }
 
@@ -248,7 +356,6 @@ function Open-FolderInExplorer {
         Start-Process "explorer.exe" -ArgumentList "`"$Path`""
         return $true
     } else {
-        # If folder doesn't exist yet, try opening parent folder
         $parent = Split-Path -Parent $Path
         if (-not [string]::IsNullOrWhiteSpace($parent) -and (Test-Path -LiteralPath $parent)) {
             Start-Process "explorer.exe" -ArgumentList "`"$parent`""
@@ -269,9 +376,10 @@ function Send-ItemToRecycleBin {
         return @{ Success = $false; Message = "File does not exist." }
     }
 
-    # Safety checks - Never allow deleting system roots
-    if ($Path -match '^[A-Za-z]:\\$|^[A-Za-z]:\\Windows(\\|$)|^[A-Za-z]:\\Program Files(\\|$)|^[A-Za-z]:\\Program Files \(x86\)(\\|$)|^[A-Za-z]:\\Users$') {
-        return @{ Success = $false; Message = "Protected system paths cannot be deleted." }
+    # Strict multi-layer safety check
+    $safety = Test-PathSafety -Path $Path
+    if (-not $safety.Safe) {
+        return @{ Success = $false; Message = "Protected Path: $($safety.Reason)" }
     }
 
     try {
@@ -305,16 +413,27 @@ function Remove-ItemPermanently {
         return @{ Success = $false; Message = "File does not exist." }
     }
 
-    # Safety checks
-    if ($Path -match '^[A-Za-z]:\\$|^[A-Za-z]:\\Windows(\\|$)|^[A-Za-z]:\\Program Files(\\|$)|^[A-Za-z]:\\Program Files \(x86\)(\\|$)|^[A-Za-z]:\\Users$') {
-        return @{ Success = $false; Message = "Protected system paths cannot be deleted." }
+    # Strict multi-layer safety check
+    $safety = Test-PathSafety -Path $Path
+    if (-not $safety.Safe) {
+        return @{ Success = $false; Message = "Action Blocked: $($safety.Reason)" }
     }
 
     try {
-        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $Path -PathType Container) {
+            [System.IO.Directory]::Delete($Path, $true)
+        } else {
+            [System.IO.File]::SetAttributes($Path, [System.IO.FileAttributes]::Normal)
+            [System.IO.File]::Delete($Path)
+        }
         return @{ Success = $true; Message = "Item permanently deleted." }
     } catch {
-        return @{ Success = $false; Message = "Delete failed: $_" }
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return @{ Success = $true; Message = "Item permanently deleted." }
+        } catch {
+            return @{ Success = $false; Message = "Delete failed: $_" }
+        }
     }
 }
 
@@ -758,6 +877,17 @@ function Invoke-ExecuteCleanup {
 
         $targetPath = $item.Target
         if (Test-Path -LiteralPath $targetPath) {
+            # Double-check safety guard on the target root
+            $targetSafety = Test-PathSafety -Path $targetPath
+            if (-not $targetSafety.Safe -and $targetPath -notlike "C:\Windows\SoftwareDistribution\*" -and $targetPath -notlike "C:\Windows\Temp*" -and $targetPath -notlike "C:\Windows\Logs\*") {
+                $msg = "BLOCKED: Target directory failed safety check: $($targetSafety.Reason)"
+                $logMessages += $msg
+                if ($null -ne $OnProgress) {
+                    & $OnProgress $msg "ERROR"
+                }
+                continue
+            }
+
             $initialCategoryBytes = $item.RawBytes
             $catFreedBytes = [long]0
             $catDeletedCount = 0
@@ -768,6 +898,16 @@ function Invoke-ExecuteCleanup {
                 $totalInCat = ($itemsToClean | Measure-Object).Count
 
                 foreach ($entry in $itemsToClean) {
+                    # Rigorous safety validation on every single item
+                    $itemSafety = Test-PathSafety -Path $entry.FullName
+                    if (-not $itemSafety.Safe) {
+                        $catSkippedCount++
+                        if ($null -ne $OnProgress) {
+                            & $OnProgress "  [SAFETY GUARD] Skipped protected item: $($entry.Name) ($($itemSafety.Reason))" "WARN"
+                        }
+                        continue
+                    }
+
                     $entryBytes = [long]0
                     $entryDeleted = $false
 
@@ -775,7 +915,6 @@ function Invoke-ExecuteCleanup {
                         if ($entry.PSIsContainer) {
                             $entryBytes = (Get-FolderSizeFast -Path $entry.FullName).RawBytes
                             
-                            # Remove readonly attributes if present
                             try {
                                 $attr = [System.IO.File]::GetAttributes($entry.FullName)
                                 if ($attr -band [System.IO.FileAttributes]::ReadOnly) {
@@ -840,7 +979,7 @@ function Invoke-ExecuteCleanup {
                     try { [System.Windows.Forms.Application]::DoEvents() } catch {}
                 }
 
-                # Restart services if stopped
+                # Restore services if paused
                 foreach ($svc in $restartedServices) {
                     try {
                         Start-Service -Name $svc -ErrorAction SilentlyContinue
@@ -850,7 +989,6 @@ function Invoke-ExecuteCleanup {
                     } catch {}
                 }
 
-                # If individual sizes couldn't be measured individually but items were removed, fall back
                 if ($catFreedBytes -le 0 -and $catDeletedCount -gt 0) {
                     $catFreedBytes = $initialCategoryBytes
                 }
@@ -861,7 +999,7 @@ function Invoke-ExecuteCleanup {
                 $freedFormatted = Format-Bytes -Bytes $catFreedBytes
                 $msg = "Purged $($item.CategoryName): Cleaned $catDeletedCount items (Freed $freedFormatted)"
                 if ($catSkippedCount -gt 0) {
-                    $msg += " [$catSkippedCount locked items skipped]"
+                    $msg += " [$catSkippedCount locked/protected items skipped]"
                 }
 
                 $logMessages += $msg

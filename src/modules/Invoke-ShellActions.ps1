@@ -30,7 +30,6 @@ function Open-FolderInExplorer {
         Start-Process "explorer.exe" -ArgumentList "`"$Path`""
         return $true
     } else {
-        # If folder doesn't exist yet, try opening parent folder
         $parent = Split-Path -Parent $Path
         if (-not [string]::IsNullOrWhiteSpace($parent) -and (Test-Path -LiteralPath $parent)) {
             Start-Process "explorer.exe" -ArgumentList "`"$parent`""
@@ -51,9 +50,10 @@ function Send-ItemToRecycleBin {
         return @{ Success = $false; Message = "File does not exist." }
     }
 
-    # Safety checks - Never allow deleting system roots
-    if ($Path -match '^[A-Za-z]:\\$|^[A-Za-z]:\\Windows(\\|$)|^[A-Za-z]:\\Program Files(\\|$)|^[A-Za-z]:\\Program Files \(x86\)(\\|$)|^[A-Za-z]:\\Users$') {
-        return @{ Success = $false; Message = "Protected system paths cannot be deleted." }
+    # Strict multi-layer safety check
+    $safety = Test-PathSafety -Path $Path
+    if (-not $safety.Safe) {
+        return @{ Success = $false; Message = "Protected Path: $($safety.Reason)" }
     }
 
     try {
@@ -87,15 +87,26 @@ function Remove-ItemPermanently {
         return @{ Success = $false; Message = "File does not exist." }
     }
 
-    # Safety checks
-    if ($Path -match '^[A-Za-z]:\\$|^[A-Za-z]:\\Windows(\\|$)|^[A-Za-z]:\\Program Files(\\|$)|^[A-Za-z]:\\Program Files \(x86\)(\\|$)|^[A-Za-z]:\\Users$') {
-        return @{ Success = $false; Message = "Protected system paths cannot be deleted." }
+    # Strict multi-layer safety check
+    $safety = Test-PathSafety -Path $Path
+    if (-not $safety.Safe) {
+        return @{ Success = $false; Message = "Action Blocked: $($safety.Reason)" }
     }
 
     try {
-        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $Path -PathType Container) {
+            [System.IO.Directory]::Delete($Path, $true)
+        } else {
+            [System.IO.File]::SetAttributes($Path, [System.IO.FileAttributes]::Normal)
+            [System.IO.File]::Delete($Path)
+        }
         return @{ Success = $true; Message = "Item permanently deleted." }
     } catch {
-        return @{ Success = $false; Message = "Delete failed: $_" }
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return @{ Success = $true; Message = "Item permanently deleted." }
+        } catch {
+            return @{ Success = $false; Message = "Delete failed: $_" }
+        }
     }
 }

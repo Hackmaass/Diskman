@@ -39,7 +39,7 @@ function Find-LargeFiles {
         $scannedFolders++
 
         # Skip system protected folders
-        if ($currentDir -match '\\\$RECYCLE\.BIN|\\System Volume Information|\\AppData\\Local\\Application Data|\\Windows\\WinSxS|\\Windows\\System32') {
+        if ($currentDir -match '\\\$RECYCLE\.BIN|\\System Volume Information|\\AppData\\Local\\Application Data|\\Windows\\WinSxS|\\Windows\\System32|\\Windows\\SysWOW64|\\Windows\\SystemApps|\\Windows\\assembly') {
             continue
         }
 
@@ -50,6 +50,10 @@ function Find-LargeFiles {
             $files = $dInfo.GetFiles()
             foreach ($f in $files) {
                 if ($f.Length -ge $MinSizeBytes) {
+                    # Safety check on file
+                    $safety = Test-PathSafety -Path $f.FullName
+                    if (-not $safety.Safe) { continue }
+
                     $ext = $f.Extension.ToLower()
                     $cat = "Other File"
 
@@ -83,7 +87,6 @@ function Find-LargeFiles {
                 $dirQueue.Enqueue($sub.FullName)
             }
         } catch {
-            # Skip unauthorized folders quietly
             continue
         }
 
