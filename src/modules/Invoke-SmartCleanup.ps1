@@ -289,7 +289,7 @@ function Scan-SmartCleanupItems {
             Group        = $t.Group
             CategoryName = $t.Category
             Icon         = $t.Icon
-            DisplayName  = "$($t.Icon) $($t.Category)"
+            DisplayName  = $t.Category
             Target       = $t.Path
             Type         = $t.Type
             SafetyLevel  = $t.SafetyLevel
