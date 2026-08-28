@@ -1,4 +1,4 @@
-﻿# Add VisualBasic assembly for native Windows Recycle Bin operations
+# Add VisualBasic assembly for native Windows Recycle Bin operations
 Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction SilentlyContinue
 
 function Show-ItemInExplorer {
@@ -10,6 +10,33 @@ function Show-ItemInExplorer {
 
     if (Test-Path -LiteralPath $Path) {
         Start-Process "explorer.exe" -ArgumentList "/select,`"$Path`""
+        return $true
+    } elseif (Test-Path -LiteralPath (Split-Path -Parent $Path)) {
+        Start-Process "explorer.exe" -ArgumentList "`"$(Split-Path -Parent $Path)`""
+        return $true
+    } else {
+        return $false
+    }
+}
+
+function Open-FolderInExplorer {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (Test-Path -LiteralPath $Path) {
+        Start-Process "explorer.exe" -ArgumentList "`"$Path`""
+        return $true
+    } else {
+        # If folder doesn't exist yet, try opening parent folder
+        $parent = Split-Path -Parent $Path
+        if (-not [string]::IsNullOrWhiteSpace($parent) -and (Test-Path -LiteralPath $parent)) {
+            Start-Process "explorer.exe" -ArgumentList "`"$parent`""
+            return $true
+        }
+        return $false
     }
 }
 
@@ -25,7 +52,7 @@ function Send-ItemToRecycleBin {
     }
 
     # Safety checks - Never allow deleting system roots
-    if ($Path -match '^[A-Za-z]:\\$|^[A-Za-z]:\\Windows|^[A-Za-z]:\\Program Files') {
+    if ($Path -match '^[A-Za-z]:\\$|^[A-Za-z]:\\Windows(\\|$)|^[A-Za-z]:\\Program Files(\\|$)|^[A-Za-z]:\\Program Files \(x86\)(\\|$)|^[A-Za-z]:\\Users$') {
         return @{ Success = $false; Message = "Protected system paths cannot be deleted." }
     }
 
@@ -61,12 +88,12 @@ function Remove-ItemPermanently {
     }
 
     # Safety checks
-    if ($Path -match '^[A-Za-z]:\\$|^[A-Za-z]:\\Windows|^[A-Za-z]:\\Program Files') {
+    if ($Path -match '^[A-Za-z]:\\$|^[A-Za-z]:\\Windows(\\|$)|^[A-Za-z]:\\Program Files(\\|$)|^[A-Za-z]:\\Program Files \(x86\)(\\|$)|^[A-Za-z]:\\Users$') {
         return @{ Success = $false; Message = "Protected system paths cannot be deleted." }
     }
 
     try {
-        Remove-Item -LiteralPath $Path -Recurse -Force
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
         return @{ Success = $true; Message = "Item permanently deleted." }
     } catch {
         return @{ Success = $false; Message = "Delete failed: $_" }

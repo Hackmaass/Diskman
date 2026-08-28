@@ -1,44 +1,44 @@
-﻿<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Diskman - Windows Storage Utility" 
-        Height="750" Width="1080" 
-        MinHeight="600" MinWidth="850"
+        Title="Diskman - C: Drive Trash &amp; Storage Cleaner" 
+        Height="780" Width="1120" 
+        MinHeight="620" MinWidth="900"
         WindowStartupLocation="CenterScreen"
-        Background="#202020"
-        Foreground="#FFFFFF"
+        Background="#18181B"
+        Foreground="#FAFAFA"
         FontFamily="Segoe UI, Tahoma, sans-serif">
 
     <Window.Resources>
-        <!-- WinUtil Classic Dark Palette -->
-        <SolidColorBrush x:Key="WinDarkBg" Color="#202020"/>
-        <SolidColorBrush x:Key="TabHeaderBg" Color="#2D2D30"/>
-        <SolidColorBrush x:Key="TabSelectedBg" Color="#3E3E42"/>
-        <SolidColorBrush x:Key="GroupBoxBg" Color="#27272A"/>
+        <!-- Fluent Dark Color Palette -->
+        <SolidColorBrush x:Key="WinDarkBg" Color="#18181B"/>
+        <SolidColorBrush x:Key="CardBg" Color="#27272A"/>
+        <SolidColorBrush x:Key="CardHeaderBg" Color="#202023"/>
         <SolidColorBrush x:Key="BorderDark" Color="#3F3F46"/>
         <SolidColorBrush x:Key="AccentCyan" Color="#00B4D8"/>
-        <SolidColorBrush x:Key="AccentGreen" Color="#2EC4B6"/>
+        <SolidColorBrush x:Key="AccentTeal" Color="#2EC4B6"/>
+        <SolidColorBrush x:Key="AccentAmber" Color="#FFB703"/>
         <SolidColorBrush x:Key="AccentRed" Color="#E63946"/>
-        <SolidColorBrush x:Key="ConsoleBg" Color="#18181B"/>
+        <SolidColorBrush x:Key="ConsoleBg" Color="#111113"/>
 
-        <!-- WinUtil Style Buttons -->
+        <!-- Standard Button Style -->
         <Style TargetType="Button">
             <Setter Property="Background" Value="#333338"/>
-            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="Foreground" Value="#FAFAFA"/>
             <Setter Property="BorderBrush" Value="#4F4F56"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="Padding" Value="13,6"/>
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5" Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter Property="Background" Value="#44444C"/>
+                                <Setter Property="Background" Value="#45454E"/>
                                 <Setter Property="BorderBrush" Value="#00B4D8"/>
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
@@ -63,12 +63,16 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5" Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter Property="Background" Value="#0096C7"/>
+                                <Setter Property="BorderBrush" Value="#90E0EF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#023E8A"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -80,7 +84,7 @@
         <Style x:Key="DangerActionBtn" TargetType="Button">
             <Setter Property="Background" Value="#9D0208"/>
             <Setter Property="Foreground" Value="#FFFFFF"/>
-            <Setter Property="BorderBrush" Value="#D00000"/>
+            <Setter Property="BorderBrush" Value="#E63946"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="16,7"/>
             <Setter Property="FontSize" Value="12"/>
@@ -89,12 +93,16 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5" Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter Property="Background" Value="#DC2F02"/>
+                                <Setter Property="BorderBrush" Value="#FF6B6B"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#6A040F"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -102,47 +110,47 @@
             </Setter>
         </Style>
 
-        <!-- WinUtil GroupBox Style -->
+        <!-- GroupBox Style -->
         <Style TargetType="GroupBox">
             <Setter Property="Foreground" Value="#00B4D8"/>
             <Setter Property="BorderBrush" Value="#3F3F46"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="12"/>
-            <Setter Property="Margin" Value="6"/>
+            <Setter Property="Padding" Value="10"/>
+            <Setter Property="Margin" Value="4"/>
             <Setter Property="FontWeight" Value="Bold"/>
             <Setter Property="FontSize" Value="13"/>
         </Style>
 
-        <!-- WinUtil CheckBox Style -->
+        <!-- CheckBox Style -->
         <Style TargetType="CheckBox">
             <Setter Property="Foreground" Value="#E4E4E7"/>
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="FontWeight" Value="Normal"/>
-            <Setter Property="Margin" Value="0,4"/>
+            <Setter Property="Margin" Value="0,3"/>
             <Setter Property="Cursor" Value="Hand"/>
         </Style>
 
-        <!-- TabItem WinUtil Style -->
+        <!-- TabItem Fluent Style -->
         <Style TargetType="TabItem">
-            <Setter Property="Background" Value="#2D2D30"/>
+            <Setter Property="Background" Value="#27272A"/>
             <Setter Property="Foreground" Value="#A1A1AA"/>
             <Setter Property="FontSize" Value="13"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Padding" Value="18,8"/>
+            <Setter Property="Padding" Value="18,9"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="TabItem">
-                        <Border x:Name="border" Background="{TemplateBinding Background}" BorderBrush="#3F3F46" BorderThickness="1,1,1,0" CornerRadius="4,4,0,0" Padding="{TemplateBinding Padding}" Margin="0,0,4,0">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" BorderBrush="#3F3F46" BorderThickness="1,1,1,0" CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}" Margin="0,0,4,0">
                             <ContentPresenter ContentSource="Header" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="border" Property="Background" Value="#3A3A40"/>
+                                <Setter TargetName="border" Property="Background" Value="#35353A"/>
                                 <Setter Property="Foreground" Value="#FFFFFF"/>
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
-                                <Setter TargetName="border" Property="Background" Value="#202020"/>
+                                <Setter TargetName="border" Property="Background" Value="#18181B"/>
                                 <Setter TargetName="border" Property="BorderBrush" Value="#00B4D8"/>
                                 <Setter Property="Foreground" Value="#00B4D8"/>
                             </Trigger>
@@ -158,13 +166,13 @@
             <Setter Property="Foreground" Value="#FAFAFA"/>
             <Setter Property="BorderBrush" Value="#3F3F46"/>
             <Setter Property="RowBackground" Value="#18181B"/>
-            <Setter Property="AlternatingRowBackground" Value="#202024"/>
+            <Setter Property="AlternatingRowBackground" Value="#222226"/>
             <Setter Property="GridLinesVisibility" Value="Horizontal"/>
             <Setter Property="HorizontalGridLinesBrush" Value="#2D2D32"/>
             <Setter Property="HeadersVisibility" Value="Column"/>
             <Setter Property="CanUserAddRows" Value="False"/>
             <Setter Property="SelectionMode" Value="Single"/>
-            <Setter Property="RowHeight" Value="28"/>
+            <Setter Property="RowHeight" Value="32"/>
             <Setter Property="FontSize" Value="12"/>
         </Style>
 
@@ -172,79 +180,93 @@
             <Setter Property="Background" Value="#27272A"/>
             <Setter Property="Foreground" Value="#A1A1AA"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="Padding" Value="10,7"/>
             <Setter Property="BorderBrush" Value="#3F3F46"/>
             <Setter Property="BorderThickness" Value="0,0,1,1"/>
         </Style>
     </Window.Resources>
 
-    <Grid Margin="12">
+    <Grid Margin="14">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
-            <RowDefinition Height="140"/>
+            <RowDefinition Height="145"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Top Header Bar -->
-        <Grid Grid.Row="0" Margin="4,0,4,10">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
+        <!-- Top Header & C: Drive Status Bar -->
+        <Grid Grid.Row="0" Margin="2,0,2,12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
 
-            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                <TextBlock Text="Diskman" FontSize="18" FontWeight="Bold" Foreground="#00B4D8" VerticalAlignment="Center"/>
-                <TextBlock Text=" - Windows Storage Analyzer &amp; Cleaner" FontSize="14" Foreground="#A1A1AA" VerticalAlignment="Center"/>
-            </StackPanel>
+            <!-- Brand Row -->
+            <Grid Grid.Row="0" Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
 
-            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button x:Name="BtnTopRefresh" Content="🔄 Refresh All" Margin="0,0,8,0"/>
-                <Button x:Name="BtnTopQuickScan" Content="⚡ Quick Clean" Style="{StaticResource PrimaryActionBtn}"/>
-            </StackPanel>
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="⚡ Diskman" FontSize="20" FontWeight="Bold" Foreground="#00B4D8" VerticalAlignment="Center"/>
+                    <TextBlock Text="  |  C: Drive Trash &amp; Storage Cleaner" FontSize="14" Foreground="#A1A1AA" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="BtnTopRefresh" Content="🔄 Refresh Stats" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnTopQuickScan" Content="🔍 Scan C: Drive Junk" Style="{StaticResource PrimaryActionBtn}"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- C: Drive Real-Time Metrics Strip -->
+            <Border Grid.Row="1" Background="#222226" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="6" Padding="12,8">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="140"/>
+                        <ColumnDefinition Width="140"/>
+                        <ColumnDefinition Width="140"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="180"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0" Margin="0,0,10,0">
+                        <TextBlock Text="C: Total Storage" Foreground="#A1A1AA" FontSize="11"/>
+                        <TextBlock x:Name="TxtCDriveTotal" Text="Calculating..." FontSize="15" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,2,0,0"/>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Margin="0,0,10,0">
+                        <TextBlock Text="C: Used Space" Foreground="#A1A1AA" FontSize="11"/>
+                        <TextBlock x:Name="TxtCDriveUsed" Text="Calculating..." FontSize="15" FontWeight="Bold" Foreground="#FFB703" Margin="0,2,0,0"/>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="2" Margin="0,0,10,0">
+                        <TextBlock Text="C: Free Available" Foreground="#A1A1AA" FontSize="11"/>
+                        <TextBlock x:Name="TxtCDriveFree" Text="Calculating..." FontSize="15" FontWeight="Bold" Foreground="#2EC4B6" Margin="0,2,0,0"/>
+                    </StackPanel>
+
+                    <!-- Drive Meter Bar -->
+                    <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="10,0,20,0">
+                        <Grid Margin="0,0,0,3">
+                            <TextBlock x:Name="TxtCBarStatus" Text="C: Drive Capacity" FontSize="11" Foreground="#A1A1AA" HorizontalAlignment="Left"/>
+                            <TextBlock x:Name="TxtCBarPercent" Text="-- % Used" FontSize="11" FontWeight="Bold" Foreground="#00B4D8" HorizontalAlignment="Right"/>
+                        </Grid>
+                        <ProgressBar x:Name="ProgressCDrive" Height="10" Value="50" Maximum="100" Background="#18181B" Foreground="#00B4D8" BorderThickness="0"/>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="4" HorizontalAlignment="Right" VerticalAlignment="Center">
+                        <TextBlock Text="Reclaimable Junk on C:" Foreground="#A1A1AA" FontSize="11" HorizontalAlignment="Right"/>
+                        <TextBlock x:Name="TxtCReclaimable" Text="~0.00 GB" FontSize="16" FontWeight="Bold" Foreground="#00B4D8" HorizontalAlignment="Right" Margin="0,2,0,0"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
         </Grid>
 
-        <!-- WinUtil Main TabControl -->
-        <TabControl Grid.Row="1" Background="#202020" BorderBrush="#3F3F46" BorderThickness="1">
+        <!-- Main TabControl -->
+        <TabControl x:Name="MainTabControl" Grid.Row="1" Background="#18181B" BorderBrush="#3F3F46" BorderThickness="1">
 
-            <!-- TAB 1: DRIVES OVERVIEW -->
-            <TabItem Header="  📊 Drives Overview  ">
-                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="10">
-                    <StackPanel>
-                        <!-- Container for dynamic drive cards -->
-                        <WrapPanel x:Name="PanelDriveCards" Margin="0,0,0,12"/>
-
-                        <!-- System Storage Summary -->
-                        <GroupBox Header="Total System Storage Summary">
-                            <Grid Margin="4,6">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-
-                                <StackPanel Grid.Column="0">
-                                    <TextBlock Text="Total Storage Capacity:" Foreground="#A1A1AA" FontSize="11"/>
-                                    <TextBlock x:Name="TxtTotalSystemStorage" Text="Calculating..." FontSize="16" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,2"/>
-                                </StackPanel>
-
-                                <StackPanel Grid.Column="1">
-                                    <TextBlock Text="Total Free Space Available:" Foreground="#A1A1AA" FontSize="11"/>
-                                    <TextBlock x:Name="TxtTotalSystemFree" Text="Calculating..." FontSize="16" FontWeight="Bold" Foreground="#2EC4B6" Margin="0,2"/>
-                                </StackPanel>
-
-                                <StackPanel Grid.Column="2">
-                                    <TextBlock Text="Estimated Reclaimable Junk:" Foreground="#A1A1AA" FontSize="11"/>
-                                    <TextBlock x:Name="TxtEstimatedReclaimable" Text="~15+ GB" FontSize="16" FontWeight="Bold" Foreground="#00B4D8" Margin="0,2"/>
-                                </StackPanel>
-                            </Grid>
-                        </GroupBox>
-                    </StackPanel>
-                </ScrollViewer>
-            </TabItem>
-
-            <!-- TAB 2: STORAGE CLEANUP (WINUTIL STYLE TWEAKS/CLEANUP) -->
-            <TabItem Header="  🧹 Storage Cleanup  ">
+            <!-- TAB 1: C: DRIVE JUNK CLEANER (PRIMARY VIEW) -->
+            <TabItem Header="  🧹 C: Drive Junk Cleaner  ">
                 <Grid Margin="10">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -252,79 +274,125 @@
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
-                    <!-- Top Action Presets Bar -->
-                    <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <!-- Presets & Actions Toolbar -->
+                    <Grid Grid.Row="0" Margin="0,0,0,10">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
+                        <!-- Selection Presets -->
                         <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
                             <Button x:Name="BtnSelectRecommended" Content="Select Recommended" Margin="0,0,6,0"/>
                             <Button x:Name="BtnSelectAll" Content="Select All" Margin="0,0,6,0"/>
-                            <Button x:Name="BtnClearSelection" Content="Clear All"/>
+                            <Button x:Name="BtnClearSelection" Content="Clear All" Margin="0,0,16,0"/>
+
+                            <!-- Filter Chips -->
+                            <TextBlock Text="Filter:" Foreground="#71717A" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11"/>
+                            <Button x:Name="BtnFilterAll" Content="All" Margin="0,0,4,0" Padding="8,4" FontSize="11"/>
+                            <Button x:Name="BtnFilterSystem" Content="System &amp; Temp" Margin="0,0,4,0" Padding="8,4" FontSize="11"/>
+                            <Button x:Name="BtnFilterDev" Content="Developer" Margin="0,0,4,0" Padding="8,4" FontSize="11"/>
+                            <Button x:Name="BtnFilterBrowser" Content="Browser &amp; Apps" Margin="0,0,4,0" Padding="8,4" FontSize="11"/>
                         </StackPanel>
 
+                        <!-- Right Scan & Clean Buttons -->
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock x:Name="TxtCleanTotalBadge" Text="Selected: 0.00 GB" FontWeight="Bold" Foreground="#00B4D8" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                            <Button x:Name="BtnScanCleanable" Content="🔍 Analyze Junk" Margin="0,0,6,0"/>
-                            <Button x:Name="BtnRunCleanup" Content="🧹 Run Cleanup" Style="{StaticResource DangerActionBtn}"/>
+                            <TextBlock x:Name="TxtCleanSelectedBadge" Text="Selected: 0.00 GB" FontWeight="Bold" Foreground="#00B4D8" VerticalAlignment="Center" Margin="0,0,12,0" FontSize="13"/>
+                            <Button x:Name="BtnScanCleanable" Content="🔍 Scan Junk" Margin="0,0,8,0"/>
+                            <Button x:Name="BtnRunCleanup" Content="🧹 Clean Selected Junk" Style="{StaticResource DangerActionBtn}"/>
                         </StackPanel>
                     </Grid>
 
-                    <!-- GroupBoxes 2x2 Layout -->
-                    <Grid Grid.Row="1">
+                    <!-- Junk Categories DataGrid -->
+                    <DataGrid x:Name="GridCleanableCategories" Grid.Row="1" AutoGenerateColumns="False">
+                        <DataGrid.Columns>
+                            <DataGridCheckBoxColumn Header="Clean?" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="55"/>
+                            <DataGridTextColumn Header="Category" Binding="{Binding DisplayName}" Width="220" FontWeight="SemiBold"/>
+                            <DataGridTextColumn Header="Group" Binding="{Binding Group}" Width="140"/>
+                            <DataGridTextColumn Header="Size on C:" Binding="{Binding DisplaySize}" Width="100" FontWeight="Bold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Items" Binding="{Binding FileCount}" Width="90"/>
+                            <DataGridTextColumn Header="Safety" Binding="{Binding SafetyLevel}" Width="95"/>
+                            <DataGridTextColumn Header="Path on C: Drive" Binding="{Binding Target}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- Bottom Action Controls for Selected Category -->
+                    <Grid Grid.Row="2" Margin="0,10,0,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="*"/>
-                            <RowDefinition Height="*"/>
-                        </Grid.RowDefinitions>
 
-                        <!-- Box 1: Windows & System Temp -->
-                        <GroupBox Grid.Row="0" Grid.Column="0" Header="Windows &amp; System Caches">
-                            <StackPanel>
-                                <CheckBox x:Name="ChkUserTemp" Content="Windows User Temp (%TEMP%)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkSysTemp" Content="Windows System Temp (C:\Windows\Temp)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkCrashDumps" Content="Application Crash Dumps (%LOCALAPPDATA%\CrashDumps)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkWerLogs" Content="Windows Error Reporting (WER Logs)" IsChecked="True"/>
-                            </StackPanel>
-                        </GroupBox>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                            <TextBlock x:Name="TxtSelectedCategoryInfo" Text="Select a category above to view files in File Explorer or clean individually." Foreground="#A1A1AA" FontSize="12"/>
+                            <TextBlock x:Name="TxtSelectedCategoryDesc" Text="" Foreground="#71717A" FontSize="11" Margin="0,2,0,0"/>
+                        </StackPanel>
 
-                        <!-- Box 2: Developer Caches -->
-                        <GroupBox Grid.Row="0" Grid.Column="1" Header="Developer &amp; Package Caches">
-                            <StackPanel>
-                                <CheckBox x:Name="ChkPipCache" Content="Python Pip Cache (%LOCALAPPDATA%\pip\cache)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkPipDCache" Content="Python D: Drive Pip Cache (D:\tmp\pip-cache)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkNpmCache" Content="Node.js NPM Cache (%APPDATA%\npm-cache)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkPyCache" Content="Python Bytecode (__pycache__)" IsChecked="True"/>
-                            </StackPanel>
-                        </GroupBox>
-
-                        <!-- Box 3: Browser & Web Caches -->
-                        <GroupBox Grid.Row="1" Grid.Column="0" Header="Browser &amp; Application Caches">
-                            <StackPanel>
-                                <CheckBox x:Name="ChkChromeCache" Content="Google Chrome Web Cache" IsChecked="True"/>
-                                <CheckBox x:Name="ChkEdgeCache" Content="Microsoft Edge Web Cache" IsChecked="True"/>
-                                <CheckBox x:Name="ChkBraveCache" Content="Brave Browser Web Cache" IsChecked="False"/>
-                            </StackPanel>
-                        </GroupBox>
-
-                        <!-- Box 4: Recycle Bin & Misc -->
-                        <GroupBox Grid.Row="1" Grid.Column="1" Header="Recycle Bin &amp; Deletions">
-                            <StackPanel>
-                                <CheckBox x:Name="ChkRecycleBin" Content="Empty Recycle Bin (All Drives)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkOldDownloads" Content="Cleanup Download Temp Files" IsChecked="False"/>
-                            </StackPanel>
-                        </GroupBox>
+                        <!-- Step 1: Open in Explorer (User requirement) -->
+                        <Button x:Name="BtnOpenCategoryInExplorer" Grid.Column="1" Content="📂 Open in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,8,0"/>
+                        <!-- Step 2: In-app File Inspector -->
+                        <Button x:Name="BtnInspectCategoryFiles" Grid.Column="2" Content="🔍 View Files in Inspector" Margin="0,0,8,0"/>
+                        <!-- Step 3: Clean Single Category -->
+                        <Button x:Name="BtnCleanSingleCategory" Grid.Column="3" Content="🧹 Clean Category" Style="{StaticResource DangerActionBtn}"/>
                     </Grid>
                 </Grid>
             </TabItem>
 
-            <!-- TAB 3: LARGE FILE HUNTER -->
-            <TabItem Header="  🎯 Large File Hunter  ">
+            <!-- TAB 2: DETAILED FILE INSPECTOR (C: JUNK FILES) -->
+            <TabItem Header="  🔍 File Inspector (C: Junk Files)  ">
+                <Grid Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Selector Bar -->
+                    <Grid Grid.Row="0" Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="260"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Column="0" Text="Junk Category: " Foreground="#A1A1AA" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <ComboBox x:Name="CmbInspectTarget" Grid.Column="1" Height="28" Background="#27272A" Foreground="#FFFFFF" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnRefreshInspectFiles" Grid.Column="2" Content="🔄 Load Files" Margin="0,0,12,0"/>
+                        <TextBlock x:Name="TxtInspectSummary" Grid.Column="3" Text="Select a category and click Load Files to inspect individual files." Foreground="#2EC4B6" VerticalAlignment="Center" HorizontalAlignment="Right" FontWeight="SemiBold"/>
+                    </Grid>
+
+                    <!-- File Items Table -->
+                    <DataGrid x:Name="GridInspectFiles" Grid.Row="1" AutoGenerateColumns="False">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="File Name" Binding="{Binding Name}" Width="250"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="95" FontWeight="SemiBold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Full Path on C: Drive" Binding="{Binding FullPath}" Width="*"/>
+                            <DataGridTextColumn Header="Last Modified" Binding="{Binding LastWriteTime}" Width="140"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- Action Bar -->
+                    <Grid Grid.Row="2" Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock x:Name="TxtSelectedInspectFileInfo" Grid.Column="0" Text="Select a file to inspect or delete." Foreground="#A1A1AA" FontSize="11" VerticalAlignment="Center"/>
+                        <Button x:Name="BtnRevealInspectFileInExplorer" Grid.Column="1" Content="📂 Reveal in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnDeleteSingleInspectFile" Grid.Column="2" Content="🗑️ Delete File" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnPurgeAllInspectFiles" Grid.Column="3" Content="🧹 Clear All Files in Target" Style="{StaticResource DangerActionBtn}"/>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
+            <!-- TAB 3: C: LARGE JUNK & INSTALLERS HUNTER -->
+            <TabItem Header="  🎯 C: Large Files Hunter  ">
                 <Grid Margin="10">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -333,46 +401,40 @@
                     </Grid.RowDefinitions>
 
                     <!-- Filter Controls -->
-                    <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <Grid Grid.Row="0" Margin="0,0,0,10">
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,10,0" VerticalAlignment="Center">
-                            <TextBlock Text="Drive: " Foreground="#A1A1AA" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="CmbHunterDrive" Width="70" Height="26" Margin="4,0,0,0" Background="#27272A" Foreground="#FFFFFF"/>
-                        </StackPanel>
-
-                        <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,0,10,0" VerticalAlignment="Center">
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,12,0" VerticalAlignment="Center">
                             <TextBlock Text="Min Size: " Foreground="#A1A1AA" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="CmbHunterSize" Width="90" Height="26" Margin="4,0,0,0" Background="#27272A" Foreground="#FFFFFF"/>
+                            <ComboBox x:Name="CmbHunterSize" Width="100" Height="28" Margin="6,0,0,0" Background="#27272A" Foreground="#FFFFFF"/>
                         </StackPanel>
 
-                        <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="0,0,10,0" VerticalAlignment="Center">
-                            <TextBlock Text="Type: " Foreground="#A1A1AA" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="CmbHunterCategory" Width="110" Height="26" Margin="4,0,0,0" Background="#27272A" Foreground="#FFFFFF"/>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,0,12,0" VerticalAlignment="Center">
+                            <TextBlock Text="Category: " Foreground="#A1A1AA" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="CmbHunterCategory" Width="140" Height="28" Margin="6,0,0,0" Background="#27272A" Foreground="#FFFFFF"/>
                         </StackPanel>
 
-                        <Button x:Name="BtnStartHunterScan" Grid.Column="4" Content="🎯 Scan Large Files" Style="{StaticResource PrimaryActionBtn}"/>
+                        <Button x:Name="BtnStartHunterScan" Grid.Column="3" Content="🎯 Scan Large C: Files" Style="{StaticResource PrimaryActionBtn}"/>
                     </Grid>
 
                     <!-- Table -->
-                    <DataGrid x:Name="GridLargeFiles" Grid.Row="1">
+                    <DataGrid x:Name="GridLargeFiles" Grid.Row="1" AutoGenerateColumns="False">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="File Name" Binding="{Binding Name}" Width="240"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="90"/>
-                            <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="130"/>
-                            <DataGridTextColumn Header="Full Path" Binding="{Binding FullPath}" Width="*"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="95" FontWeight="Bold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="140"/>
+                            <DataGridTextColumn Header="Full Path on C: Drive" Binding="{Binding FullPath}" Width="*"/>
                             <DataGridTextColumn Header="Modified" Binding="{Binding LastWriteTime}" Width="130"/>
                         </DataGrid.Columns>
                     </DataGrid>
 
                     <!-- Action buttons -->
-                    <Grid Grid.Row="2" Margin="0,8,0,0">
+                    <Grid Grid.Row="2" Margin="0,10,0,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
@@ -380,43 +442,43 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <TextBlock x:Name="TxtSelectedFileInfo" Grid.Column="0" Text="Select a file to perform action." Foreground="#A1A1AA" FontSize="11" VerticalAlignment="Center"/>
-                        <Button x:Name="BtnRevealInExplorer" Grid.Column="1" Content="📂 Open in Explorer" Margin="0,0,6,0"/>
-                        <Button x:Name="BtnSendToTrash" Grid.Column="2" Content="🗑️ Send to Trash" Margin="0,0,6,0"/>
-                        <Button x:Name="BtnPermanentDelete" Grid.Column="3" Content="⚡ Delete" Style="{StaticResource DangerActionBtn}"/>
+                        <TextBlock x:Name="TxtSelectedFileInfo" Grid.Column="0" Text="Select a large file to perform action." Foreground="#A1A1AA" FontSize="11" VerticalAlignment="Center"/>
+                        <Button x:Name="BtnRevealInExplorer" Grid.Column="1" Content="📂 Reveal in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnSendToTrash" Grid.Column="2" Content="🗑️ Send to Recycle Bin" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnPermanentDelete" Grid.Column="3" Content="⚡ Permanent Delete" Style="{StaticResource DangerActionBtn}"/>
                     </Grid>
                 </Grid>
             </TabItem>
 
-            <!-- TAB 4: DIRECTORY EXPLORER -->
-            <TabItem Header="  📂 Directory Explorer  ">
+            <!-- TAB 4: C: DRIVE DIRECTORY TREE EXPLORER -->
+            <TabItem Header="  📊 C: Directory Explorer  ">
                 <Grid Margin="10">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
 
-                    <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <Grid Grid.Row="0" Margin="0,0,0,10">
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <ComboBox x:Name="CmbExplorerDrive" Grid.Column="0" Width="80" Height="26" Margin="0,0,6,0" Background="#27272A" Foreground="#FFFFFF"/>
-                        <Button x:Name="BtnFolderUp" Grid.Column="1" Content="⬆️ Up" Margin="0,0,6,0"/>
-                        <TextBox x:Name="TxtCurrentPath" Grid.Column="2" Height="26" Background="#18181B" Foreground="#00B4D8" BorderBrush="#3F3F46" Padding="6,3" IsReadOnly="True" VerticalContentAlignment="Center"/>
-                        <Button x:Name="BtnScanCurrentDir" Grid.Column="3" Content="🔍 Scan" Style="{StaticResource PrimaryActionBtn}" Margin="6,0,0,0"/>
+                        <Button x:Name="BtnFolderUp" Grid.Column="0" Content="⬆️ Up Folder" Margin="0,0,8,0"/>
+                        <TextBox x:Name="TxtCurrentPath" Grid.Column="1" Height="28" Background="#18181B" Foreground="#00B4D8" BorderBrush="#3F3F46" Padding="8,4" IsReadOnly="True" VerticalContentAlignment="Center"/>
+                        <Button x:Name="BtnScanCurrentDir" Grid.Column="2" Content="🔍 Scan Folder" Style="{StaticResource PrimaryActionBtn}" Margin="8,0,8,0"/>
+                        <Button x:Name="BtnOpenCurrentInExplorer" Grid.Column="3" Content="📂 Open in Explorer"/>
                     </Grid>
 
-                    <DataGrid x:Name="GridDirectories" Grid.Row="1">
+                    <DataGrid x:Name="GridDirectories" Grid.Row="1" AutoGenerateColumns="False">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="260"/>
+                            <DataGridTextColumn Header="Folder / File Name" Binding="{Binding Name}" Width="280"/>
                             <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="60"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="100"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="100" FontWeight="SemiBold" Foreground="#00B4D8"/>
                             <DataGridTextColumn Header="% Parent" Binding="{Binding PercentStr}" Width="90"/>
-                            <DataGridTextColumn Header="Items" Binding="{Binding ItemCount}" Width="80"/>
+                            <DataGridTextColumn Header="Items" Binding="{Binding ItemCount}" Width="85"/>
                             <DataGridTextColumn Header="Last Modified" Binding="{Binding LastModified}" Width="*"/>
                         </DataGrid.Columns>
                     </DataGrid>
@@ -424,8 +486,8 @@
             </TabItem>
         </TabControl>
 
-        <!-- Bottom WinUtil Console / Output Terminal -->
-        <GroupBox Grid.Row="2" Header="Activity &amp; Execution Log" Margin="0,8,0,0">
+        <!-- Bottom Console / Output Terminal -->
+        <GroupBox Grid.Row="2" Header="Activity &amp; Execution Log" Margin="0,10,0,0">
             <TextBox x:Name="TxtConsoleLog" Background="{StaticResource ConsoleBg}" Foreground="#2EC4B6" FontFamily="Consolas, monospace" FontSize="11" BorderThickness="0" IsReadOnly="True" VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
         </GroupBox>
 
@@ -436,8 +498,8 @@
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
-            <TextBlock x:Name="TxtGlobalStatus" Grid.Column="0" Text="Ready | Diskman v1.0.0 (WinUtil-style Engine)" FontSize="11" Foreground="#71717A"/>
-            <TextBlock Grid.Column="1" Text="Elevated Administrator Mode" FontSize="11" Foreground="#2EC4B6"/>
+            <TextBlock x:Name="TxtGlobalStatus" Grid.Column="0" Text="Ready | Diskman - C: Drive Trash &amp; Storage Cleaner" FontSize="11" Foreground="#71717A"/>
+            <TextBlock Grid.Column="1" Text="Windows Storage Optimization Engine" FontSize="11" Foreground="#2EC4B6"/>
         </Grid>
     </Grid>
 </Window>

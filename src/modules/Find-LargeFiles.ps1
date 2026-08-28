@@ -1,8 +1,8 @@
-﻿function Find-LargeFiles {
+function Find-LargeFiles {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$TargetPath,
+        [Parameter(Mandatory = $false)]
+        [string]$TargetPath = "C:\",
 
         [Parameter(Mandatory = $false)]
         [long]$MinSizeBytes = 100MB,
@@ -11,7 +11,7 @@
         [string]$CategoryFilter = "All Categories",
 
         [Parameter(Mandatory = $false)]
-        [int]$Limit = 60
+        [int]$Limit = 100
     )
 
     if (-not (Test-Path -LiteralPath $TargetPath)) {
@@ -20,25 +20,26 @@
 
     $results = @()
 
-    $videoExt = @(".mp4", ".mkv", ".mov", ".avi", ".webm", ".wmv", ".flv", ".m4v", ".ts")
-    $archiveExt = @(".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz")
-    $aiExt = @(".bin", ".safetensors", ".gguf", ".pt", ".pth", ".onnx", ".model", ".h5", ".ckpt")
-    $diskExt = @(".iso", ".vhd", ".vhdx", ".img", ".vmdk", ".qcow2")
-    $installerExt = @(".exe", ".msi", ".pkg", ".appinstaller")
-    $dataExt = @(".csv", ".parquet", ".db", ".sqlite", ".sql", ".bak")
+    $installerExt = @(".exe", ".msi", ".pkg", ".appinstaller", ".cab")
+    $diskExt      = @(".iso", ".vhd", ".vhdx", ".img", ".vmdk", ".qcow2")
+    $archiveExt   = @(".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz")
+    $videoExt     = @(".mp4", ".mkv", ".mov", ".avi", ".webm", ".wmv", ".flv", ".m4v", ".ts")
+    $aiExt        = @(".bin", ".safetensors", ".gguf", ".pt", ".pth", ".onnx", ".model", ".h5", ".ckpt")
+    $logExt       = @(".log", ".dmp", ".trace", ".etl", ".bak", ".old")
+    $dataExt      = @(".csv", ".parquet", ".db", ".sqlite", ".sql")
 
     $dirQueue = New-Object System.Collections.Generic.Queue[string]
     $dirQueue.Enqueue($TargetPath)
 
     $scannedFolders = 0
-    $maxFolders = 2000 # safeguard against infinite loops or slow drives
+    $maxFolders = 2500 # safeguard against infinite loops or slow drives
 
     while ($dirQueue.Count -gt 0 -and $scannedFolders -lt $maxFolders) {
         $currentDir = $dirQueue.Dequeue()
         $scannedFolders++
 
         # Skip system protected folders
-        if ($currentDir -match '\\\$RECYCLE\.BIN|\\System Volume Information|\\AppData\\Local\\Application Data') {
+        if ($currentDir -match '\\\$RECYCLE\.BIN|\\System Volume Information|\\AppData\\Local\\Application Data|\\Windows\\WinSxS|\\Windows\\System32') {
             continue
         }
 
@@ -52,11 +53,12 @@
                     $ext = $f.Extension.ToLower()
                     $cat = "Other File"
 
-                    if ($ext -in $videoExt) { $cat = "Video / Media" }
-                    elseif ($ext -in $archiveExt) { $cat = "Archive / Zip" }
-                    elseif ($ext -in $aiExt) { $cat = "AI Model / Weights" }
+                    if ($ext -in $installerExt) { $cat = "Installer / Package" }
                     elseif ($ext -in $diskExt) { $cat = "Disk Image / ISO" }
-                    elseif ($ext -in $installerExt) { $cat = "Executable / Installer" }
+                    elseif ($ext -in $archiveExt) { $cat = "Archive / Zip" }
+                    elseif ($ext -in $videoExt) { $cat = "Video / Media" }
+                    elseif ($ext -in $logExt) { $cat = "Log / Dump File" }
+                    elseif ($ext -in $aiExt) { $cat = "AI Model / Weights" }
                     elseif ($ext -in $dataExt) { $cat = "Dataset / Database" }
 
                     if ($CategoryFilter -eq "All Categories" -or $cat -like "*$CategoryFilter*") {

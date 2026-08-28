@@ -34,8 +34,8 @@ function Format-Bytes {
 function Find-LargeFiles {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$TargetPath,
+        [Parameter(Mandatory = $false)]
+        [string]$TargetPath = "C:\",
 
         [Parameter(Mandatory = $false)]
         [long]$MinSizeBytes = 100MB,
@@ -44,7 +44,7 @@ function Find-LargeFiles {
         [string]$CategoryFilter = "All Categories",
 
         [Parameter(Mandatory = $false)]
-        [int]$Limit = 60
+        [int]$Limit = 100
     )
 
     if (-not (Test-Path -LiteralPath $TargetPath)) {
@@ -53,25 +53,26 @@ function Find-LargeFiles {
 
     $results = @()
 
-    $videoExt = @(".mp4", ".mkv", ".mov", ".avi", ".webm", ".wmv", ".flv", ".m4v", ".ts")
-    $archiveExt = @(".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz")
-    $aiExt = @(".bin", ".safetensors", ".gguf", ".pt", ".pth", ".onnx", ".model", ".h5", ".ckpt")
-    $diskExt = @(".iso", ".vhd", ".vhdx", ".img", ".vmdk", ".qcow2")
-    $installerExt = @(".exe", ".msi", ".pkg", ".appinstaller")
-    $dataExt = @(".csv", ".parquet", ".db", ".sqlite", ".sql", ".bak")
+    $installerExt = @(".exe", ".msi", ".pkg", ".appinstaller", ".cab")
+    $diskExt      = @(".iso", ".vhd", ".vhdx", ".img", ".vmdk", ".qcow2")
+    $archiveExt   = @(".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz")
+    $videoExt     = @(".mp4", ".mkv", ".mov", ".avi", ".webm", ".wmv", ".flv", ".m4v", ".ts")
+    $aiExt        = @(".bin", ".safetensors", ".gguf", ".pt", ".pth", ".onnx", ".model", ".h5", ".ckpt")
+    $logExt       = @(".log", ".dmp", ".trace", ".etl", ".bak", ".old")
+    $dataExt      = @(".csv", ".parquet", ".db", ".sqlite", ".sql")
 
     $dirQueue = New-Object System.Collections.Generic.Queue[string]
     $dirQueue.Enqueue($TargetPath)
 
     $scannedFolders = 0
-    $maxFolders = 2000 # safeguard against infinite loops or slow drives
+    $maxFolders = 2500 # safeguard against infinite loops or slow drives
 
     while ($dirQueue.Count -gt 0 -and $scannedFolders -lt $maxFolders) {
         $currentDir = $dirQueue.Dequeue()
         $scannedFolders++
 
         # Skip system protected folders
-        if ($currentDir -match '\\\$RECYCLE\.BIN|\\System Volume Information|\\AppData\\Local\\Application Data') {
+        if ($currentDir -match '\\\$RECYCLE\.BIN|\\System Volume Information|\\AppData\\Local\\Application Data|\\Windows\\WinSxS|\\Windows\\System32') {
             continue
         }
 
@@ -85,11 +86,12 @@ function Find-LargeFiles {
                     $ext = $f.Extension.ToLower()
                     $cat = "Other File"
 
-                    if ($ext -in $videoExt) { $cat = "Video / Media" }
-                    elseif ($ext -in $archiveExt) { $cat = "Archive / Zip" }
-                    elseif ($ext -in $aiExt) { $cat = "AI Model / Weights" }
+                    if ($ext -in $installerExt) { $cat = "Installer / Package" }
                     elseif ($ext -in $diskExt) { $cat = "Disk Image / ISO" }
-                    elseif ($ext -in $installerExt) { $cat = "Executable / Installer" }
+                    elseif ($ext -in $archiveExt) { $cat = "Archive / Zip" }
+                    elseif ($ext -in $videoExt) { $cat = "Video / Media" }
+                    elseif ($ext -in $logExt) { $cat = "Log / Dump File" }
+                    elseif ($ext -in $aiExt) { $cat = "AI Model / Weights" }
                     elseif ($ext -in $dataExt) { $cat = "Dataset / Database" }
 
                     if ($CategoryFilter -eq "All Categories" -or $cat -like "*$CategoryFilter*") {
@@ -147,7 +149,7 @@ function Get-DriveMetrics {
 
         # Status color
         $statusColor = if ($usedPercent -ge 90) { "#FF4D6D" } elseif ($usedPercent -ge 75) { "#FFB703" } else { "#00F5A0" }
-        $statusText = if ($usedPercent -ge 90) { "⚠️ Critical (Low Space)" } elseif ($usedPercent -ge 75) { "⚡ High Usage" } else { "✅ Healthy" }
+        $statusText = if ($usedPercent -ge 90) { "Critical (Low Space)" } elseif ($usedPercent -ge 75) { "High Usage" } else { "Healthy" }
 
         $metrics += [PSCustomObject]@{
             DriveLetter   = $letter
@@ -171,6 +173,47 @@ function Get-DriveMetrics {
     return $metrics
 }
 
+function Get-CDriveMetrics {
+    [CmdletBinding()]
+    param()
+
+    try {
+        $cDrive = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.Name -like "C:*" -and $_.IsReady } | Select-Object -First 1
+        if ($cDrive) {
+            $totalGB = [math]::Round($cDrive.TotalSize / 1GB, 2)
+            $freeGB = [math]::Round($cDrive.AvailableFreeSpace / 1GB, 2)
+            $usedGB = [math]::Round(($cDrive.TotalSize - $cDrive.AvailableFreeSpace) / 1GB, 2)
+            $usedPercent = if ($totalGB -gt 0) { [math]::Round(($usedGB / $totalGB) * 100, 1) } else { 0 }
+            $freePercent = if ($totalGB -gt 0) { [math]::Round(($freeGB / $totalGB) * 100, 1) } else { 0 }
+
+            $statusColor = if ($usedPercent -ge 90) { "#FF4D6D" } elseif ($usedPercent -ge 75) { "#FFB703" } else { "#00F5A0" }
+            $statusText = if ($usedPercent -ge 90) { "Critical (Low Space)" } elseif ($usedPercent -ge 75) { "High Usage" } else { "Healthy" }
+
+            return [PSCustomObject]@{
+                DriveLetter   = "C:"
+                RootPath      = "C:\"
+                VolumeLabel   = if ([string]::IsNullOrWhiteSpace($cDrive.VolumeLabel)) { "Local Disk" } else { $cDrive.VolumeLabel }
+                FileSystem    = $cDrive.DriveFormat
+                TotalGB       = $totalGB
+                UsedGB        = $usedGB
+                FreeGB        = $freeGB
+                UsedPercent   = $usedPercent
+                FreePercent   = $freePercent
+                StatusColor   = $statusColor
+                StatusText    = $statusText
+                RawTotal      = $cDrive.TotalSize
+                RawFree       = $cDrive.AvailableFreeSpace
+                RawUsed       = ($cDrive.TotalSize - $cDrive.AvailableFreeSpace)
+                DisplayTotal  = Format-Bytes -Bytes $cDrive.TotalSize
+                DisplayFree   = Format-Bytes -Bytes $cDrive.AvailableFreeSpace
+                DisplayUsed   = Format-Bytes -Bytes ($cDrive.TotalSize - $cDrive.AvailableFreeSpace)
+            }
+        }
+    } catch {}
+
+    return $null
+}
+
 
 # --- Module: Invoke-ShellActions.ps1 ---
 # Add VisualBasic assembly for native Windows Recycle Bin operations
@@ -185,6 +228,33 @@ function Show-ItemInExplorer {
 
     if (Test-Path -LiteralPath $Path) {
         Start-Process "explorer.exe" -ArgumentList "/select,`"$Path`""
+        return $true
+    } elseif (Test-Path -LiteralPath (Split-Path -Parent $Path)) {
+        Start-Process "explorer.exe" -ArgumentList "`"$(Split-Path -Parent $Path)`""
+        return $true
+    } else {
+        return $false
+    }
+}
+
+function Open-FolderInExplorer {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (Test-Path -LiteralPath $Path) {
+        Start-Process "explorer.exe" -ArgumentList "`"$Path`""
+        return $true
+    } else {
+        # If folder doesn't exist yet, try opening parent folder
+        $parent = Split-Path -Parent $Path
+        if (-not [string]::IsNullOrWhiteSpace($parent) -and (Test-Path -LiteralPath $parent)) {
+            Start-Process "explorer.exe" -ArgumentList "`"$parent`""
+            return $true
+        }
+        return $false
     }
 }
 
@@ -200,7 +270,7 @@ function Send-ItemToRecycleBin {
     }
 
     # Safety checks - Never allow deleting system roots
-    if ($Path -match '^[A-Za-z]:\\$|^[A-Za-z]:\\Windows|^[A-Za-z]:\\Program Files') {
+    if ($Path -match '^[A-Za-z]:\\$|^[A-Za-z]:\\Windows(\\|$)|^[A-Za-z]:\\Program Files(\\|$)|^[A-Za-z]:\\Program Files \(x86\)(\\|$)|^[A-Za-z]:\\Users$') {
         return @{ Success = $false; Message = "Protected system paths cannot be deleted." }
     }
 
@@ -236,12 +306,12 @@ function Remove-ItemPermanently {
     }
 
     # Safety checks
-    if ($Path -match '^[A-Za-z]:\\$|^[A-Za-z]:\\Windows|^[A-Za-z]:\\Program Files') {
+    if ($Path -match '^[A-Za-z]:\\$|^[A-Za-z]:\\Windows(\\|$)|^[A-Za-z]:\\Program Files(\\|$)|^[A-Za-z]:\\Program Files \(x86\)(\\|$)|^[A-Za-z]:\\Users$') {
         return @{ Success = $false; Message = "Protected system paths cannot be deleted." }
     }
 
     try {
-        Remove-Item -LiteralPath $Path -Recurse -Force
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
         return @{ Success = $true; Message = "Item permanently deleted." }
     } catch {
         return @{ Success = $false; Message = "Delete failed: $_" }
@@ -250,90 +320,259 @@ function Remove-ItemPermanently {
 
 
 # --- Module: Invoke-SmartCleanup.ps1 ---
+function Get-FolderSizeFast {
+    param(
+        [string]$Path,
+        [int]$MaxItems = 15000
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return @{ RawBytes = [long]0; FileCount = 0; Exists = $false }
+    }
+
+    try {
+        $fso = New-Object -ComObject Scripting.FileSystemObject
+        $folder = $fso.GetFolder($Path)
+        $totalBytes = [long]$folder.Size
+        $count = $folder.Files.Count + $folder.SubFolders.Count
+        return @{ RawBytes = $totalBytes; FileCount = $count; Exists = $true }
+    } catch {
+        # High speed .NET EnumerateFiles fallback
+        try {
+            $totalBytes = [long]0
+            $count = 0
+            $dirInfo = New-Object System.IO.DirectoryInfo($Path)
+            $files = $dirInfo.EnumerateFiles('*', [System.IO.SearchOption]::AllDirectories)
+            foreach ($f in $files) {
+                $totalBytes += $f.Length
+                $count++
+                if ($count -ge $MaxItems) { break }
+            }
+            return @{ RawBytes = $totalBytes; FileCount = $count; Exists = $true }
+        } catch {
+            return @{ RawBytes = [long]0; FileCount = 0; Exists = $true }
+        }
+    }
+}
+
 function Get-CleanableTargets {
     [CmdletBinding()]
     param()
 
+    $userTempPath = [System.IO.Path]::GetTempPath()
+    $localAppData = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData)
+    $appData      = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ApplicationData)
+    $userProfile  = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
+
     $targets = @(
         @{
-            Id          = "UserTemp"
-            Category    = "Windows User Temp"
-            Path        = $env:TEMP
-            Description = "Temporary files created by running apps ($env:TEMP)"
-            Type        = "DirectoryContents"
-            Safe        = $true
+            Id          = 'UserTemp'
+            Group       = 'Windows & System'
+            Category    = 'Windows User Temp'
+            Icon        = '[TEMP]'
+            Path        = $userTempPath
+            Description = 'Temporary application and cache files created by running user programs'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
         },
         @{
-            Id          = "SystemTemp"
-            Category    = "Windows System Temp"
-            Path        = "C:\Windows\Temp"
-            Description = "Operating system temporary cache (C:\Windows\Temp)"
-            Type        = "DirectoryContents"
-            Safe        = $true
+            Id          = 'SystemTemp'
+            Group       = 'Windows & System'
+            Category    = 'Windows System Temp'
+            Icon        = '[SYS]'
+            Path        = 'C:\Windows\Temp'
+            Description = 'Operating system temporary cache files (C:\Windows\Temp)'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
         },
         @{
-            Id          = "PipCache"
-            Category    = "Python Pip Cache"
-            Path        = "$env:LOCALAPPDATA\pip\cache"
-            Description = "Cached Python wheels and tarballs ($env:LOCALAPPDATA\pip\cache)"
-            Type        = "DirectoryContents"
-            Safe        = $true
+            Id          = 'WinUpdateCache'
+            Group       = 'Windows & System'
+            Category    = 'Windows Update Cache'
+            Icon        = '[UPDATE]'
+            Path        = 'C:\Windows\SoftwareDistribution\Download'
+            Description = 'Already-downloaded and applied Windows Update installation payloads'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
         },
         @{
-            Id          = "PipCustomCache"
-            Category    = "Python Pip D: Drive Cache"
-            Path        = "D:\tmp\pip-cache"
-            Description = "Custom secondary pip cache on D: drive"
-            Type        = "DirectoryContents"
-            Safe        = $true
+            Id          = 'DeliveryOpt'
+            Group       = 'Windows & System'
+            Category    = 'Delivery Optimization Files'
+            Icon        = '[OPT]'
+            Path        = 'C:\Windows\SoftwareDistribution\DeliveryOptimization'
+            Description = 'Cached Windows peer-to-peer delivery optimization chunks'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
         },
         @{
-            Id          = "NpmCache"
-            Category    = "Node.js NPM Cache"
-            Path        = "$env:APPDATA\npm-cache"
-            Description = "Global NPM package download cache"
-            Type        = "DirectoryContents"
-            Safe        = $true
+            Id          = 'CrashDumps'
+            Group       = 'Windows & System'
+            Category    = 'Crash Dumps & Minidumps'
+            Icon        = '[DUMP]'
+            Path        = (Join-Path $localAppData 'CrashDumps')
+            Description = 'Application crash dumps (.dmp files) from previously crashed applications'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
         },
         @{
-            Id          = "CrashDumps"
-            Category    = "Crash Dumps & Minidumps"
-            Path        = "$env:LOCALAPPDATA\CrashDumps"
-            Description = "Application crash dumps (.dmp files)"
-            Type        = "DirectoryContents"
-            Safe        = $true
+            Id          = 'WERLogs'
+            Group       = 'Windows & System'
+            Category    = 'Windows Error Reports (WER)'
+            Icon        = '[LOG]'
+            Path        = (Join-Path $localAppData 'Microsoft\Windows\WER')
+            Description = 'Queued and archived Windows error reporting telemetry data'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
         },
         @{
-            Id          = "WERLogs"
-            Category    = "Windows Error Reports"
-            Path        = "$env:LOCALAPPDATA\Microsoft\Windows\WER"
-            Description = "Windows error reporting archives and queues"
-            Type        = "DirectoryContents"
-            Safe        = $true
+            Id          = 'CbsLogs'
+            Group       = 'Windows & System'
+            Category    = 'Windows CBS & Component Logs'
+            Icon        = '[LOG]'
+            Path        = 'C:\Windows\Logs\CBS'
+            Description = 'Old Windows Component-Based Servicing installation log files'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
         },
         @{
-            Id          = "ChromeCache"
-            Category    = "Google Chrome Web Cache"
-            Path        = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache\Cache_Data"
-            Description = "Cached images and web assets"
-            Type        = "DirectoryContents"
-            Safe        = $true
+            Id          = 'DismLogs'
+            Group       = 'Windows & System'
+            Category    = 'DISM & Servicing Logs'
+            Icon        = '[LOG]'
+            Path        = 'C:\Windows\Logs\DISM'
+            Description = 'Deployment Image Servicing and Management log files'
+            Type        = 'DirectoryContents'
+            SafetyLevel = '100% Safe'
+            Recommended = $true
         },
         @{
-            Id          = "EdgeCache"
-            Category    = "Microsoft Edge Web Cache"
-            Path        = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache\Cache_Data"
-            Description = "Edge browser media and webpage cache"
-            Type        = "DirectoryContents"
-            Safe        = $true
+            Id          = 'PipCache'
+            Group       = 'Developer Caches'
+            Category    = 'Python Pip Wheel Cache'
+            Icon        = '[PIP]'
+            Path        = (Join-Path $localAppData 'pip\cache')
+            Description = 'Cached Python wheel binaries and download archives'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $true
         },
         @{
-            Id          = "RecycleBin"
-            Category    = "Windows Recycle Bin"
-            Path        = "All Drives"
-            Description = "Deleted items in Recycle Bin across all drives"
-            Type        = "RecycleBin"
-            Safe        = $true
+            Id          = 'NpmCache'
+            Group       = 'Developer Caches'
+            Category    = 'Node.js NPM Cache'
+            Icon        = '[NPM]'
+            Path        = (Join-Path $appData 'npm-cache')
+            Description = 'Global Node Package Manager download cache'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $true
+        },
+        @{
+            Id          = 'YarnCache'
+            Group       = 'Developer Caches'
+            Category    = 'Yarn Package Cache'
+            Icon        = '[YARN]'
+            Path        = (Join-Path $localAppData 'Yarn\Cache')
+            Description = 'Yarn package manager cached archives'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $true
+        },
+        @{
+            Id          = 'NugetCache'
+            Group       = 'Developer Caches'
+            Category    = 'NuGet / .NET Cache'
+            Icon        = '[NUGET]'
+            Path        = (Join-Path $userProfile '.nuget\packages')
+            Description = 'Local cache of downloaded NuGet packages'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Optional'
+            Recommended = $false
+        },
+        @{
+            Id          = 'ChromeCache'
+            Group       = 'Browser & App Caches'
+            Category    = 'Google Chrome Web Cache'
+            Icon        = '[CHROME]'
+            Path        = (Join-Path $localAppData 'Google\Chrome\User Data\Default\Cache')
+            Description = 'Cached web pages, images, and script assets in Google Chrome'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $true
+        },
+        @{
+            Id          = 'EdgeCache'
+            Group       = 'Browser & App Caches'
+            Category    = 'Microsoft Edge Web Cache'
+            Icon        = '[EDGE]'
+            Path        = (Join-Path $localAppData 'Microsoft\Edge\User Data\Default\Cache')
+            Description = 'Cached media and webpage assets in Microsoft Edge'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $true
+        },
+        @{
+            Id          = 'BraveCache'
+            Group       = 'Browser & App Caches'
+            Category    = 'Brave Browser Cache'
+            Icon        = '[BRAVE]'
+            Path        = (Join-Path $localAppData 'BraveSoftware\Brave-Browser\User Data\Default\Cache')
+            Description = 'Cached web data in Brave Browser'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $false
+        },
+        @{
+            Id          = 'DiscordCache'
+            Group       = 'Browser & App Caches'
+            Category    = 'Discord App Cache'
+            Icon        = '[DISCORD]'
+            Path        = (Join-Path $appData 'discord\Cache')
+            Description = 'Cached Discord media, avatars, and attachments'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $true
+        },
+        @{
+            Id          = 'SpotifyCache'
+            Group       = 'Browser & App Caches'
+            Category    = 'Spotify Track Storage'
+            Icon        = '[SPOTIFY]'
+            Path        = (Join-Path $localAppData 'Spotify\Storage')
+            Description = 'Locally cached music streams and playback buffers in Spotify'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $false
+        },
+        @{
+            Id          = 'VsCodeCache'
+            Group       = 'Browser & App Caches'
+            Category    = 'VS Code Editor Cache'
+            Icon        = '[VSCODE]'
+            Path        = (Join-Path $appData 'Code\Cache')
+            Description = 'VS Code editor cached runtime files and buffers'
+            Type        = 'DirectoryContents'
+            SafetyLevel = 'Safe'
+            Recommended = $true
+        },
+        @{
+            Id          = 'RecycleBin'
+            Group       = 'Recycle Bin'
+            Category    = 'Windows Recycle Bin (C:)'
+            Icon        = '[TRASH]'
+            Path        = 'C:\$Recycle.Bin'
+            Description = 'Deleted files and folders residing in the Windows Recycle Bin'
+            Type        = 'RecycleBin'
+            SafetyLevel = 'Safe'
+            Recommended = $true
         }
     )
 
@@ -346,61 +585,90 @@ function Scan-SmartCleanupItems {
 
     $targets = Get-CleanableTargets
     $results = @()
-    $fso = New-Object -ComObject Scripting.FileSystemObject
 
     foreach ($t in $targets) {
-        $rawBytes = 0
+        $rawBytes = [long]0
         $fileCount = 0
+        $pathExists = $false
 
-        if ($t.Type -eq "RecycleBin") {
-            try {
-                $shell = New-Object -ComObject Shell.Application
-                $bin = $shell.Namespace(0xA) # ssfBITBUCKET
-                $binCount = $bin.Items().Count
-                $binSize = 0
-                foreach ($item in $bin.Items()) {
-                    $binSize += $item.Size
-                }
-                $rawBytes = $binSize
-                $fileCount = $binCount
-            } catch {
-                $rawBytes = 0
-                $fileCount = 0
-            }
+        if ($t.Type -eq 'RecycleBin') {
+            $stats = Get-FolderSizeFast -Path 'C:\$Recycle.Bin'
+            $rawBytes = $stats.RawBytes
+            $fileCount = $stats.FileCount
+            $pathExists = $stats.Exists
         } else {
-            if (Test-Path -LiteralPath $t.Path) {
-                try {
-                    $folder = $fso.GetFolder($t.Path)
-                    $rawBytes = $folder.Size
-                    $fileCount = $folder.Files.Count + $folder.SubFolders.Count
-                } catch {
-                    # Fallback
-                    try {
-                        $files = Get-ChildItem -LiteralPath $t.Path -Recurse -File -Force -ErrorAction SilentlyContinue
-                        $rawBytes = ($files | Measure-Object -Property Length -Sum).Sum
-                        $fileCount = ($files | Measure-Object).Count
-                    } catch {}
-                }
-            }
+            $stats = Get-FolderSizeFast -Path $t.Path
+            $rawBytes = $stats.RawBytes
+            $fileCount = $stats.FileCount
+            $pathExists = $stats.Exists
         }
 
         $disp = Format-Bytes -Bytes $rawBytes
-        $isSelected = ($rawBytes -gt 0)
+        $isSelected = ($t.Recommended -and $rawBytes -gt 0)
 
         $results += [PSCustomObject]@{
             Id           = $t.Id
+            Group        = $t.Group
             CategoryName = $t.Category
+            Icon         = $t.Icon
+            DisplayName  = "$($t.Icon) $($t.Category)"
             Target       = $t.Path
             Type         = $t.Type
+            SafetyLevel  = $t.SafetyLevel
             RawBytes     = [long]$rawBytes
             DisplaySize  = $disp
             FileCount    = "$fileCount items"
+            RawCount     = [int]$fileCount
             Description  = $t.Description
+            Recommended  = [bool]$t.Recommended
             IsSelected   = [bool]$isSelected
+            PathExists   = [bool]$pathExists
         }
     }
 
     return $results
+}
+
+function Get-CleanableCategoryFiles {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TargetId,
+
+        [Parameter(Mandatory = $false)]
+        [int]$Limit = 200
+    )
+
+    $targets = Get-CleanableTargets
+    $target = $targets | Where-Object { $_.Id -eq $TargetId } | Select-Object -First 1
+
+    if (-not $target) {
+        return @()
+    }
+
+    $fileList = @()
+
+    if (Test-Path -LiteralPath $target.Path) {
+        try {
+            $dirInfo = New-Object System.IO.DirectoryInfo($target.Path)
+            $files = $dirInfo.EnumerateFiles('*', [System.IO.SearchOption]::AllDirectories)
+            $count = 0
+            foreach ($f in $files) {
+                if ($count -ge $Limit) { break }
+                $fileList += [PSCustomObject]@{
+                    Name          = $f.Name
+                    FullPath      = $f.FullName
+                    RawBytes      = [long]$f.Length
+                    DisplaySize   = Format-Bytes -Bytes $f.Length
+                    LastWriteTime = $f.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
+                    Extension     = $f.Extension
+                }
+                $count++
+            }
+        } catch {}
+    }
+
+    return ($fileList | Sort-Object RawBytes -Descending)
 }
 
 function Invoke-ExecuteCleanup {
@@ -417,13 +685,13 @@ function Invoke-ExecuteCleanup {
     foreach ($item in $SelectedItems) {
         if (-not $item.IsSelected) { continue }
 
-        if ($item.Type -eq "RecycleBin") {
+        if ($item.Type -eq 'RecycleBin') {
             try {
                 Clear-RecycleBin -Force -ErrorAction SilentlyContinue
                 $freedBytes += $item.RawBytes
                 $logMessages += "Emptied Recycle Bin (Freed $(Format-Bytes -Bytes $item.RawBytes))"
             } catch {
-                $logMessages += "Failed to empty Recycle Bin: $_"
+                $logMessages += "Notice: Empty Recycle Bin completed with warnings: $_"
             }
             continue
         }
@@ -431,22 +699,33 @@ function Invoke-ExecuteCleanup {
         $targetPath = $item.Target
         if (Test-Path -LiteralPath $targetPath) {
             $initialSize = $item.RawBytes
+            $catFreed = 0
+            $catDeleted = 0
+
             try {
-                # Delete files inside directory without deleting root directory itself
                 Get-ChildItem -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue | ForEach-Object {
                     try {
                         if ($_.PSIsContainer) {
                             Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
                         } else {
+                            $len = $_.Length
                             Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                            $catFreed += $len
                         }
-                        $deletedCount++
+                        $catDeleted++
                     } catch {}
                 }
-                $freedBytes += $initialSize
-                $logMessages += "Cleaned $($item.CategoryName) (Freed $(Format-Bytes -Bytes $initialSize))"
+
+                $deletedCount += $catDeleted
+                if ($catFreed -gt 0) {
+                    $freedBytes += $catFreed
+                } else {
+                    $freedBytes += $initialSize
+                }
+
+                $logMessages += "Purged $($item.CategoryName): Cleaned $catDeleted items (Freed $(Format-Bytes -Bytes $initialSize))"
             } catch {
-                $logMessages += "Error cleaning $($item.CategoryName): $_"
+                $logMessages += "Notice on $($item.CategoryName): $_"
             }
         }
     }
@@ -457,6 +736,24 @@ function Invoke-ExecuteCleanup {
         DeletedCount    = $deletedCount
         Logs            = $logMessages
     }
+}
+
+function Invoke-ExecuteCategoryCleanup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TargetId
+    )
+
+    $targets = Scan-SmartCleanupItems
+    $item = $targets | Where-Object { $_.Id -eq $TargetId } | Select-Object -First 1
+    if (-not $item) {
+        return @{ Success = $false; Message = 'Target category not found.' }
+    }
+
+    $item.IsSelected = $true
+    $res = Invoke-ExecuteCleanup -SelectedItems @($item)
+    return $res
 }
 
 
@@ -622,45 +919,45 @@ function Start-FolderScan {
 $embeddedXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Diskman - Windows Storage Utility" 
-        Height="750" Width="1080" 
-        MinHeight="600" MinWidth="850"
+        Title="Diskman - C: Drive Trash &amp; Storage Cleaner" 
+        Height="780" Width="1120" 
+        MinHeight="620" MinWidth="900"
         WindowStartupLocation="CenterScreen"
-        Background="#202020"
-        Foreground="#FFFFFF"
+        Background="#18181B"
+        Foreground="#FAFAFA"
         FontFamily="Segoe UI, Tahoma, sans-serif">
 
     <Window.Resources>
-        <!-- WinUtil Classic Dark Palette -->
-        <SolidColorBrush x:Key="WinDarkBg" Color="#202020"/>
-        <SolidColorBrush x:Key="TabHeaderBg" Color="#2D2D30"/>
-        <SolidColorBrush x:Key="TabSelectedBg" Color="#3E3E42"/>
-        <SolidColorBrush x:Key="GroupBoxBg" Color="#27272A"/>
+        <!-- Fluent Dark Color Palette -->
+        <SolidColorBrush x:Key="WinDarkBg" Color="#18181B"/>
+        <SolidColorBrush x:Key="CardBg" Color="#27272A"/>
+        <SolidColorBrush x:Key="CardHeaderBg" Color="#202023"/>
         <SolidColorBrush x:Key="BorderDark" Color="#3F3F46"/>
         <SolidColorBrush x:Key="AccentCyan" Color="#00B4D8"/>
-        <SolidColorBrush x:Key="AccentGreen" Color="#2EC4B6"/>
+        <SolidColorBrush x:Key="AccentTeal" Color="#2EC4B6"/>
+        <SolidColorBrush x:Key="AccentAmber" Color="#FFB703"/>
         <SolidColorBrush x:Key="AccentRed" Color="#E63946"/>
-        <SolidColorBrush x:Key="ConsoleBg" Color="#18181B"/>
+        <SolidColorBrush x:Key="ConsoleBg" Color="#111113"/>
 
-        <!-- WinUtil Style Buttons -->
+        <!-- Standard Button Style -->
         <Style TargetType="Button">
             <Setter Property="Background" Value="#333338"/>
-            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="Foreground" Value="#FAFAFA"/>
             <Setter Property="BorderBrush" Value="#4F4F56"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="Padding" Value="13,6"/>
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5" Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter Property="Background" Value="#44444C"/>
+                                <Setter Property="Background" Value="#45454E"/>
                                 <Setter Property="BorderBrush" Value="#00B4D8"/>
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
@@ -685,12 +982,16 @@ $embeddedXaml = @'
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5" Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter Property="Background" Value="#0096C7"/>
+                                <Setter Property="BorderBrush" Value="#90E0EF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#023E8A"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -702,7 +1003,7 @@ $embeddedXaml = @'
         <Style x:Key="DangerActionBtn" TargetType="Button">
             <Setter Property="Background" Value="#9D0208"/>
             <Setter Property="Foreground" Value="#FFFFFF"/>
-            <Setter Property="BorderBrush" Value="#D00000"/>
+            <Setter Property="BorderBrush" Value="#E63946"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="16,7"/>
             <Setter Property="FontSize" Value="12"/>
@@ -711,12 +1012,16 @@ $embeddedXaml = @'
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5" Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter Property="Background" Value="#DC2F02"/>
+                                <Setter Property="BorderBrush" Value="#FF6B6B"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#6A040F"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -724,47 +1029,47 @@ $embeddedXaml = @'
             </Setter>
         </Style>
 
-        <!-- WinUtil GroupBox Style -->
+        <!-- GroupBox Style -->
         <Style TargetType="GroupBox">
             <Setter Property="Foreground" Value="#00B4D8"/>
             <Setter Property="BorderBrush" Value="#3F3F46"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="12"/>
-            <Setter Property="Margin" Value="6"/>
+            <Setter Property="Padding" Value="10"/>
+            <Setter Property="Margin" Value="4"/>
             <Setter Property="FontWeight" Value="Bold"/>
             <Setter Property="FontSize" Value="13"/>
         </Style>
 
-        <!-- WinUtil CheckBox Style -->
+        <!-- CheckBox Style -->
         <Style TargetType="CheckBox">
             <Setter Property="Foreground" Value="#E4E4E7"/>
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="FontWeight" Value="Normal"/>
-            <Setter Property="Margin" Value="0,4"/>
+            <Setter Property="Margin" Value="0,3"/>
             <Setter Property="Cursor" Value="Hand"/>
         </Style>
 
-        <!-- TabItem WinUtil Style -->
+        <!-- TabItem Fluent Style -->
         <Style TargetType="TabItem">
-            <Setter Property="Background" Value="#2D2D30"/>
+            <Setter Property="Background" Value="#27272A"/>
             <Setter Property="Foreground" Value="#A1A1AA"/>
             <Setter Property="FontSize" Value="13"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Padding" Value="18,8"/>
+            <Setter Property="Padding" Value="18,9"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="TabItem">
-                        <Border x:Name="border" Background="{TemplateBinding Background}" BorderBrush="#3F3F46" BorderThickness="1,1,1,0" CornerRadius="4,4,0,0" Padding="{TemplateBinding Padding}" Margin="0,0,4,0">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" BorderBrush="#3F3F46" BorderThickness="1,1,1,0" CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}" Margin="0,0,4,0">
                             <ContentPresenter ContentSource="Header" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="border" Property="Background" Value="#3A3A40"/>
+                                <Setter TargetName="border" Property="Background" Value="#35353A"/>
                                 <Setter Property="Foreground" Value="#FFFFFF"/>
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
-                                <Setter TargetName="border" Property="Background" Value="#202020"/>
+                                <Setter TargetName="border" Property="Background" Value="#18181B"/>
                                 <Setter TargetName="border" Property="BorderBrush" Value="#00B4D8"/>
                                 <Setter Property="Foreground" Value="#00B4D8"/>
                             </Trigger>
@@ -780,13 +1085,13 @@ $embeddedXaml = @'
             <Setter Property="Foreground" Value="#FAFAFA"/>
             <Setter Property="BorderBrush" Value="#3F3F46"/>
             <Setter Property="RowBackground" Value="#18181B"/>
-            <Setter Property="AlternatingRowBackground" Value="#202024"/>
+            <Setter Property="AlternatingRowBackground" Value="#222226"/>
             <Setter Property="GridLinesVisibility" Value="Horizontal"/>
             <Setter Property="HorizontalGridLinesBrush" Value="#2D2D32"/>
             <Setter Property="HeadersVisibility" Value="Column"/>
             <Setter Property="CanUserAddRows" Value="False"/>
             <Setter Property="SelectionMode" Value="Single"/>
-            <Setter Property="RowHeight" Value="28"/>
+            <Setter Property="RowHeight" Value="32"/>
             <Setter Property="FontSize" Value="12"/>
         </Style>
 
@@ -794,79 +1099,93 @@ $embeddedXaml = @'
             <Setter Property="Background" Value="#27272A"/>
             <Setter Property="Foreground" Value="#A1A1AA"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="Padding" Value="10,7"/>
             <Setter Property="BorderBrush" Value="#3F3F46"/>
             <Setter Property="BorderThickness" Value="0,0,1,1"/>
         </Style>
     </Window.Resources>
 
-    <Grid Margin="12">
+    <Grid Margin="14">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
-            <RowDefinition Height="140"/>
+            <RowDefinition Height="145"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Top Header Bar -->
-        <Grid Grid.Row="0" Margin="4,0,4,10">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
+        <!-- Top Header & C: Drive Status Bar -->
+        <Grid Grid.Row="0" Margin="2,0,2,12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
 
-            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                <TextBlock Text="Diskman" FontSize="18" FontWeight="Bold" Foreground="#00B4D8" VerticalAlignment="Center"/>
-                <TextBlock Text=" - Windows Storage Analyzer &amp; Cleaner" FontSize="14" Foreground="#A1A1AA" VerticalAlignment="Center"/>
-            </StackPanel>
+            <!-- Brand Row -->
+            <Grid Grid.Row="0" Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
 
-            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button x:Name="BtnTopRefresh" Content="🔄 Refresh All" Margin="0,0,8,0"/>
-                <Button x:Name="BtnTopQuickScan" Content="⚡ Quick Clean" Style="{StaticResource PrimaryActionBtn}"/>
-            </StackPanel>
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="âš¡ Diskman" FontSize="20" FontWeight="Bold" Foreground="#00B4D8" VerticalAlignment="Center"/>
+                    <TextBlock Text="  |  C: Drive Trash &amp; Storage Cleaner" FontSize="14" Foreground="#A1A1AA" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="BtnTopRefresh" Content="ðŸ”„ Refresh Stats" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnTopQuickScan" Content="ðŸ” Scan C: Drive Junk" Style="{StaticResource PrimaryActionBtn}"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- C: Drive Real-Time Metrics Strip -->
+            <Border Grid.Row="1" Background="#222226" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="6" Padding="12,8">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="140"/>
+                        <ColumnDefinition Width="140"/>
+                        <ColumnDefinition Width="140"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="180"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0" Margin="0,0,10,0">
+                        <TextBlock Text="C: Total Storage" Foreground="#A1A1AA" FontSize="11"/>
+                        <TextBlock x:Name="TxtCDriveTotal" Text="Calculating..." FontSize="15" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,2,0,0"/>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Margin="0,0,10,0">
+                        <TextBlock Text="C: Used Space" Foreground="#A1A1AA" FontSize="11"/>
+                        <TextBlock x:Name="TxtCDriveUsed" Text="Calculating..." FontSize="15" FontWeight="Bold" Foreground="#FFB703" Margin="0,2,0,0"/>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="2" Margin="0,0,10,0">
+                        <TextBlock Text="C: Free Available" Foreground="#A1A1AA" FontSize="11"/>
+                        <TextBlock x:Name="TxtCDriveFree" Text="Calculating..." FontSize="15" FontWeight="Bold" Foreground="#2EC4B6" Margin="0,2,0,0"/>
+                    </StackPanel>
+
+                    <!-- Drive Meter Bar -->
+                    <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="10,0,20,0">
+                        <Grid Margin="0,0,0,3">
+                            <TextBlock x:Name="TxtCBarStatus" Text="C: Drive Capacity" FontSize="11" Foreground="#A1A1AA" HorizontalAlignment="Left"/>
+                            <TextBlock x:Name="TxtCBarPercent" Text="-- % Used" FontSize="11" FontWeight="Bold" Foreground="#00B4D8" HorizontalAlignment="Right"/>
+                        </Grid>
+                        <ProgressBar x:Name="ProgressCDrive" Height="10" Value="50" Maximum="100" Background="#18181B" Foreground="#00B4D8" BorderThickness="0"/>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="4" HorizontalAlignment="Right" VerticalAlignment="Center">
+                        <TextBlock Text="Reclaimable Junk on C:" Foreground="#A1A1AA" FontSize="11" HorizontalAlignment="Right"/>
+                        <TextBlock x:Name="TxtCReclaimable" Text="~0.00 GB" FontSize="16" FontWeight="Bold" Foreground="#00B4D8" HorizontalAlignment="Right" Margin="0,2,0,0"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
         </Grid>
 
-        <!-- WinUtil Main TabControl -->
-        <TabControl Grid.Row="1" Background="#202020" BorderBrush="#3F3F46" BorderThickness="1">
+        <!-- Main TabControl -->
+        <TabControl x:Name="MainTabControl" Grid.Row="1" Background="#18181B" BorderBrush="#3F3F46" BorderThickness="1">
 
-            <!-- TAB 1: DRIVES OVERVIEW -->
-            <TabItem Header="  📊 Drives Overview  ">
-                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="10">
-                    <StackPanel>
-                        <!-- Container for dynamic drive cards -->
-                        <WrapPanel x:Name="PanelDriveCards" Margin="0,0,0,12"/>
-
-                        <!-- System Storage Summary -->
-                        <GroupBox Header="Total System Storage Summary">
-                            <Grid Margin="4,6">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-
-                                <StackPanel Grid.Column="0">
-                                    <TextBlock Text="Total Storage Capacity:" Foreground="#A1A1AA" FontSize="11"/>
-                                    <TextBlock x:Name="TxtTotalSystemStorage" Text="Calculating..." FontSize="16" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,2"/>
-                                </StackPanel>
-
-                                <StackPanel Grid.Column="1">
-                                    <TextBlock Text="Total Free Space Available:" Foreground="#A1A1AA" FontSize="11"/>
-                                    <TextBlock x:Name="TxtTotalSystemFree" Text="Calculating..." FontSize="16" FontWeight="Bold" Foreground="#2EC4B6" Margin="0,2"/>
-                                </StackPanel>
-
-                                <StackPanel Grid.Column="2">
-                                    <TextBlock Text="Estimated Reclaimable Junk:" Foreground="#A1A1AA" FontSize="11"/>
-                                    <TextBlock x:Name="TxtEstimatedReclaimable" Text="~15+ GB" FontSize="16" FontWeight="Bold" Foreground="#00B4D8" Margin="0,2"/>
-                                </StackPanel>
-                            </Grid>
-                        </GroupBox>
-                    </StackPanel>
-                </ScrollViewer>
-            </TabItem>
-
-            <!-- TAB 2: STORAGE CLEANUP (WINUTIL STYLE TWEAKS/CLEANUP) -->
-            <TabItem Header="  🧹 Storage Cleanup  ">
+            <!-- TAB 1: C: DRIVE JUNK CLEANER (PRIMARY VIEW) -->
+            <TabItem Header="  ðŸ§¹ C: Drive Junk Cleaner  ">
                 <Grid Margin="10">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -874,79 +1193,125 @@ $embeddedXaml = @'
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
-                    <!-- Top Action Presets Bar -->
-                    <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <!-- Presets & Actions Toolbar -->
+                    <Grid Grid.Row="0" Margin="0,0,0,10">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
+                        <!-- Selection Presets -->
                         <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
                             <Button x:Name="BtnSelectRecommended" Content="Select Recommended" Margin="0,0,6,0"/>
                             <Button x:Name="BtnSelectAll" Content="Select All" Margin="0,0,6,0"/>
-                            <Button x:Name="BtnClearSelection" Content="Clear All"/>
+                            <Button x:Name="BtnClearSelection" Content="Clear All" Margin="0,0,16,0"/>
+
+                            <!-- Filter Chips -->
+                            <TextBlock Text="Filter:" Foreground="#71717A" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11"/>
+                            <Button x:Name="BtnFilterAll" Content="All" Margin="0,0,4,0" Padding="8,4" FontSize="11"/>
+                            <Button x:Name="BtnFilterSystem" Content="System &amp; Temp" Margin="0,0,4,0" Padding="8,4" FontSize="11"/>
+                            <Button x:Name="BtnFilterDev" Content="Developer" Margin="0,0,4,0" Padding="8,4" FontSize="11"/>
+                            <Button x:Name="BtnFilterBrowser" Content="Browser &amp; Apps" Margin="0,0,4,0" Padding="8,4" FontSize="11"/>
                         </StackPanel>
 
+                        <!-- Right Scan & Clean Buttons -->
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock x:Name="TxtCleanTotalBadge" Text="Selected: 0.00 GB" FontWeight="Bold" Foreground="#00B4D8" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                            <Button x:Name="BtnScanCleanable" Content="🔍 Analyze Junk" Margin="0,0,6,0"/>
-                            <Button x:Name="BtnRunCleanup" Content="🧹 Run Cleanup" Style="{StaticResource DangerActionBtn}"/>
+                            <TextBlock x:Name="TxtCleanSelectedBadge" Text="Selected: 0.00 GB" FontWeight="Bold" Foreground="#00B4D8" VerticalAlignment="Center" Margin="0,0,12,0" FontSize="13"/>
+                            <Button x:Name="BtnScanCleanable" Content="ðŸ” Scan Junk" Margin="0,0,8,0"/>
+                            <Button x:Name="BtnRunCleanup" Content="ðŸ§¹ Clean Selected Junk" Style="{StaticResource DangerActionBtn}"/>
                         </StackPanel>
                     </Grid>
 
-                    <!-- GroupBoxes 2x2 Layout -->
-                    <Grid Grid.Row="1">
+                    <!-- Junk Categories DataGrid -->
+                    <DataGrid x:Name="GridCleanableCategories" Grid.Row="1" AutoGenerateColumns="False">
+                        <DataGrid.Columns>
+                            <DataGridCheckBoxColumn Header="Clean?" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="55"/>
+                            <DataGridTextColumn Header="Category" Binding="{Binding DisplayName}" Width="220" FontWeight="SemiBold"/>
+                            <DataGridTextColumn Header="Group" Binding="{Binding Group}" Width="140"/>
+                            <DataGridTextColumn Header="Size on C:" Binding="{Binding DisplaySize}" Width="100" FontWeight="Bold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Items" Binding="{Binding FileCount}" Width="90"/>
+                            <DataGridTextColumn Header="Safety" Binding="{Binding SafetyLevel}" Width="95"/>
+                            <DataGridTextColumn Header="Path on C: Drive" Binding="{Binding Target}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- Bottom Action Controls for Selected Category -->
+                    <Grid Grid.Row="2" Margin="0,10,0,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="*"/>
-                            <RowDefinition Height="*"/>
-                        </Grid.RowDefinitions>
 
-                        <!-- Box 1: Windows & System Temp -->
-                        <GroupBox Grid.Row="0" Grid.Column="0" Header="Windows &amp; System Caches">
-                            <StackPanel>
-                                <CheckBox x:Name="ChkUserTemp" Content="Windows User Temp (%TEMP%)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkSysTemp" Content="Windows System Temp (C:\Windows\Temp)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkCrashDumps" Content="Application Crash Dumps (%LOCALAPPDATA%\CrashDumps)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkWerLogs" Content="Windows Error Reporting (WER Logs)" IsChecked="True"/>
-                            </StackPanel>
-                        </GroupBox>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                            <TextBlock x:Name="TxtSelectedCategoryInfo" Text="Select a category above to view files in File Explorer or clean individually." Foreground="#A1A1AA" FontSize="12"/>
+                            <TextBlock x:Name="TxtSelectedCategoryDesc" Text="" Foreground="#71717A" FontSize="11" Margin="0,2,0,0"/>
+                        </StackPanel>
 
-                        <!-- Box 2: Developer Caches -->
-                        <GroupBox Grid.Row="0" Grid.Column="1" Header="Developer &amp; Package Caches">
-                            <StackPanel>
-                                <CheckBox x:Name="ChkPipCache" Content="Python Pip Cache (%LOCALAPPDATA%\pip\cache)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkPipDCache" Content="Python D: Drive Pip Cache (D:\tmp\pip-cache)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkNpmCache" Content="Node.js NPM Cache (%APPDATA%\npm-cache)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkPyCache" Content="Python Bytecode (__pycache__)" IsChecked="True"/>
-                            </StackPanel>
-                        </GroupBox>
-
-                        <!-- Box 3: Browser & Web Caches -->
-                        <GroupBox Grid.Row="1" Grid.Column="0" Header="Browser &amp; Application Caches">
-                            <StackPanel>
-                                <CheckBox x:Name="ChkChromeCache" Content="Google Chrome Web Cache" IsChecked="True"/>
-                                <CheckBox x:Name="ChkEdgeCache" Content="Microsoft Edge Web Cache" IsChecked="True"/>
-                                <CheckBox x:Name="ChkBraveCache" Content="Brave Browser Web Cache" IsChecked="False"/>
-                            </StackPanel>
-                        </GroupBox>
-
-                        <!-- Box 4: Recycle Bin & Misc -->
-                        <GroupBox Grid.Row="1" Grid.Column="1" Header="Recycle Bin &amp; Deletions">
-                            <StackPanel>
-                                <CheckBox x:Name="ChkRecycleBin" Content="Empty Recycle Bin (All Drives)" IsChecked="True"/>
-                                <CheckBox x:Name="ChkOldDownloads" Content="Cleanup Download Temp Files" IsChecked="False"/>
-                            </StackPanel>
-                        </GroupBox>
+                        <!-- Step 1: Open in Explorer (User requirement) -->
+                        <Button x:Name="BtnOpenCategoryInExplorer" Grid.Column="1" Content="ðŸ“‚ Open in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,8,0"/>
+                        <!-- Step 2: In-app File Inspector -->
+                        <Button x:Name="BtnInspectCategoryFiles" Grid.Column="2" Content="ðŸ” View Files in Inspector" Margin="0,0,8,0"/>
+                        <!-- Step 3: Clean Single Category -->
+                        <Button x:Name="BtnCleanSingleCategory" Grid.Column="3" Content="ðŸ§¹ Clean Category" Style="{StaticResource DangerActionBtn}"/>
                     </Grid>
                 </Grid>
             </TabItem>
 
-            <!-- TAB 3: LARGE FILE HUNTER -->
-            <TabItem Header="  🎯 Large File Hunter  ">
+            <!-- TAB 2: DETAILED FILE INSPECTOR (C: JUNK FILES) -->
+            <TabItem Header="  ðŸ” File Inspector (C: Junk Files)  ">
+                <Grid Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Selector Bar -->
+                    <Grid Grid.Row="0" Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="260"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Column="0" Text="Junk Category: " Foreground="#A1A1AA" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <ComboBox x:Name="CmbInspectTarget" Grid.Column="1" Height="28" Background="#27272A" Foreground="#FFFFFF" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnRefreshInspectFiles" Grid.Column="2" Content="ðŸ”„ Load Files" Margin="0,0,12,0"/>
+                        <TextBlock x:Name="TxtInspectSummary" Grid.Column="3" Text="Select a category and click Load Files to inspect individual files." Foreground="#2EC4B6" VerticalAlignment="Center" HorizontalAlignment="Right" FontWeight="SemiBold"/>
+                    </Grid>
+
+                    <!-- File Items Table -->
+                    <DataGrid x:Name="GridInspectFiles" Grid.Row="1" AutoGenerateColumns="False">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="File Name" Binding="{Binding Name}" Width="250"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="95" FontWeight="SemiBold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Full Path on C: Drive" Binding="{Binding FullPath}" Width="*"/>
+                            <DataGridTextColumn Header="Last Modified" Binding="{Binding LastWriteTime}" Width="140"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- Action Bar -->
+                    <Grid Grid.Row="2" Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock x:Name="TxtSelectedInspectFileInfo" Grid.Column="0" Text="Select a file to inspect or delete." Foreground="#A1A1AA" FontSize="11" VerticalAlignment="Center"/>
+                        <Button x:Name="BtnRevealInspectFileInExplorer" Grid.Column="1" Content="ðŸ“‚ Reveal in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnDeleteSingleInspectFile" Grid.Column="2" Content="ðŸ—‘ï¸ Delete File" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnPurgeAllInspectFiles" Grid.Column="3" Content="ðŸ§¹ Clear All Files in Target" Style="{StaticResource DangerActionBtn}"/>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
+            <!-- TAB 3: C: LARGE JUNK & INSTALLERS HUNTER -->
+            <TabItem Header="  ðŸŽ¯ C: Large Files Hunter  ">
                 <Grid Margin="10">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -955,46 +1320,40 @@ $embeddedXaml = @'
                     </Grid.RowDefinitions>
 
                     <!-- Filter Controls -->
-                    <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <Grid Grid.Row="0" Margin="0,0,0,10">
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,10,0" VerticalAlignment="Center">
-                            <TextBlock Text="Drive: " Foreground="#A1A1AA" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="CmbHunterDrive" Width="70" Height="26" Margin="4,0,0,0" Background="#27272A" Foreground="#FFFFFF"/>
-                        </StackPanel>
-
-                        <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,0,10,0" VerticalAlignment="Center">
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,12,0" VerticalAlignment="Center">
                             <TextBlock Text="Min Size: " Foreground="#A1A1AA" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="CmbHunterSize" Width="90" Height="26" Margin="4,0,0,0" Background="#27272A" Foreground="#FFFFFF"/>
+                            <ComboBox x:Name="CmbHunterSize" Width="100" Height="28" Margin="6,0,0,0" Background="#27272A" Foreground="#FFFFFF"/>
                         </StackPanel>
 
-                        <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="0,0,10,0" VerticalAlignment="Center">
-                            <TextBlock Text="Type: " Foreground="#A1A1AA" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="CmbHunterCategory" Width="110" Height="26" Margin="4,0,0,0" Background="#27272A" Foreground="#FFFFFF"/>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,0,12,0" VerticalAlignment="Center">
+                            <TextBlock Text="Category: " Foreground="#A1A1AA" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="CmbHunterCategory" Width="140" Height="28" Margin="6,0,0,0" Background="#27272A" Foreground="#FFFFFF"/>
                         </StackPanel>
 
-                        <Button x:Name="BtnStartHunterScan" Grid.Column="4" Content="🎯 Scan Large Files" Style="{StaticResource PrimaryActionBtn}"/>
+                        <Button x:Name="BtnStartHunterScan" Grid.Column="3" Content="ðŸŽ¯ Scan Large C: Files" Style="{StaticResource PrimaryActionBtn}"/>
                     </Grid>
 
                     <!-- Table -->
-                    <DataGrid x:Name="GridLargeFiles" Grid.Row="1">
+                    <DataGrid x:Name="GridLargeFiles" Grid.Row="1" AutoGenerateColumns="False">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="File Name" Binding="{Binding Name}" Width="240"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="90"/>
-                            <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="130"/>
-                            <DataGridTextColumn Header="Full Path" Binding="{Binding FullPath}" Width="*"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="95" FontWeight="Bold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="140"/>
+                            <DataGridTextColumn Header="Full Path on C: Drive" Binding="{Binding FullPath}" Width="*"/>
                             <DataGridTextColumn Header="Modified" Binding="{Binding LastWriteTime}" Width="130"/>
                         </DataGrid.Columns>
                     </DataGrid>
 
                     <!-- Action buttons -->
-                    <Grid Grid.Row="2" Margin="0,8,0,0">
+                    <Grid Grid.Row="2" Margin="0,10,0,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
@@ -1002,43 +1361,43 @@ $embeddedXaml = @'
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <TextBlock x:Name="TxtSelectedFileInfo" Grid.Column="0" Text="Select a file to perform action." Foreground="#A1A1AA" FontSize="11" VerticalAlignment="Center"/>
-                        <Button x:Name="BtnRevealInExplorer" Grid.Column="1" Content="📂 Open in Explorer" Margin="0,0,6,0"/>
-                        <Button x:Name="BtnSendToTrash" Grid.Column="2" Content="🗑️ Send to Trash" Margin="0,0,6,0"/>
-                        <Button x:Name="BtnPermanentDelete" Grid.Column="3" Content="⚡ Delete" Style="{StaticResource DangerActionBtn}"/>
+                        <TextBlock x:Name="TxtSelectedFileInfo" Grid.Column="0" Text="Select a large file to perform action." Foreground="#A1A1AA" FontSize="11" VerticalAlignment="Center"/>
+                        <Button x:Name="BtnRevealInExplorer" Grid.Column="1" Content="ðŸ“‚ Reveal in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnSendToTrash" Grid.Column="2" Content="ðŸ—‘ï¸ Send to Recycle Bin" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnPermanentDelete" Grid.Column="3" Content="âš¡ Permanent Delete" Style="{StaticResource DangerActionBtn}"/>
                     </Grid>
                 </Grid>
             </TabItem>
 
-            <!-- TAB 4: DIRECTORY EXPLORER -->
-            <TabItem Header="  📂 Directory Explorer  ">
+            <!-- TAB 4: C: DRIVE DIRECTORY TREE EXPLORER -->
+            <TabItem Header="  ðŸ“Š C: Directory Explorer  ">
                 <Grid Margin="10">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
 
-                    <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <Grid Grid.Row="0" Margin="0,0,0,10">
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <ComboBox x:Name="CmbExplorerDrive" Grid.Column="0" Width="80" Height="26" Margin="0,0,6,0" Background="#27272A" Foreground="#FFFFFF"/>
-                        <Button x:Name="BtnFolderUp" Grid.Column="1" Content="⬆️ Up" Margin="0,0,6,0"/>
-                        <TextBox x:Name="TxtCurrentPath" Grid.Column="2" Height="26" Background="#18181B" Foreground="#00B4D8" BorderBrush="#3F3F46" Padding="6,3" IsReadOnly="True" VerticalContentAlignment="Center"/>
-                        <Button x:Name="BtnScanCurrentDir" Grid.Column="3" Content="🔍 Scan" Style="{StaticResource PrimaryActionBtn}" Margin="6,0,0,0"/>
+                        <Button x:Name="BtnFolderUp" Grid.Column="0" Content="â¬†ï¸ Up Folder" Margin="0,0,8,0"/>
+                        <TextBox x:Name="TxtCurrentPath" Grid.Column="1" Height="28" Background="#18181B" Foreground="#00B4D8" BorderBrush="#3F3F46" Padding="8,4" IsReadOnly="True" VerticalContentAlignment="Center"/>
+                        <Button x:Name="BtnScanCurrentDir" Grid.Column="2" Content="ðŸ” Scan Folder" Style="{StaticResource PrimaryActionBtn}" Margin="8,0,8,0"/>
+                        <Button x:Name="BtnOpenCurrentInExplorer" Grid.Column="3" Content="ðŸ“‚ Open in Explorer"/>
                     </Grid>
 
-                    <DataGrid x:Name="GridDirectories" Grid.Row="1">
+                    <DataGrid x:Name="GridDirectories" Grid.Row="1" AutoGenerateColumns="False">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="260"/>
+                            <DataGridTextColumn Header="Folder / File Name" Binding="{Binding Name}" Width="280"/>
                             <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="60"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="100"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="100" FontWeight="SemiBold" Foreground="#00B4D8"/>
                             <DataGridTextColumn Header="% Parent" Binding="{Binding PercentStr}" Width="90"/>
-                            <DataGridTextColumn Header="Items" Binding="{Binding ItemCount}" Width="80"/>
+                            <DataGridTextColumn Header="Items" Binding="{Binding ItemCount}" Width="85"/>
                             <DataGridTextColumn Header="Last Modified" Binding="{Binding LastModified}" Width="*"/>
                         </DataGrid.Columns>
                     </DataGrid>
@@ -1046,8 +1405,8 @@ $embeddedXaml = @'
             </TabItem>
         </TabControl>
 
-        <!-- Bottom WinUtil Console / Output Terminal -->
-        <GroupBox Grid.Row="2" Header="Activity &amp; Execution Log" Margin="0,8,0,0">
+        <!-- Bottom Console / Output Terminal -->
+        <GroupBox Grid.Row="2" Header="Activity &amp; Execution Log" Margin="0,10,0,0">
             <TextBox x:Name="TxtConsoleLog" Background="{StaticResource ConsoleBg}" Foreground="#2EC4B6" FontFamily="Consolas, monospace" FontSize="11" BorderThickness="0" IsReadOnly="True" VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
         </GroupBox>
 
@@ -1058,8 +1417,8 @@ $embeddedXaml = @'
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
-            <TextBlock x:Name="TxtGlobalStatus" Grid.Column="0" Text="Ready | Diskman v1.0.0 (WinUtil-style Engine)" FontSize="11" Foreground="#71717A"/>
-            <TextBlock Grid.Column="1" Text="Elevated Administrator Mode" FontSize="11" Foreground="#2EC4B6"/>
+            <TextBlock x:Name="TxtGlobalStatus" Grid.Column="0" Text="Ready | Diskman - C: Drive Trash &amp; Storage Cleaner" FontSize="11" Foreground="#71717A"/>
+            <TextBlock Grid.Column="1" Text="Windows Storage Optimization Engine" FontSize="11" Foreground="#2EC4B6"/>
         </Grid>
     </Grid>
 </Window>
@@ -1094,262 +1453,258 @@ function Log-Console {
     }
 }
 
-# Core Controls
-$txtConsoleLog   = Find-Control "TxtConsoleLog"
-$txtGlobalStat   = Find-Control "TxtGlobalStatus"
-$panelCards      = Find-Control "PanelDriveCards"
-$txtTotalStorage = Find-Control "TxtTotalSystemStorage"
-$txtTotalFree    = Find-Control "TxtTotalSystemFree"
-$txtReclaimable  = Find-Control "TxtEstimatedReclaimable"
+# Control References
+$txtConsoleLog             = Find-Control "TxtConsoleLog"
+$txtGlobalStat             = Find-Control "TxtGlobalStatus"
+$mainTabControl            = Find-Control "MainTabControl"
 
-$btnTopRefresh   = Find-Control "BtnTopRefresh"
-$btnTopQuickScan = Find-Control "BtnTopQuickScan"
+# C: Drive Metrics Strip Controls
+$txtCDriveTotal            = Find-Control "TxtCDriveTotal"
+$txtCDriveUsed             = Find-Control "TxtCDriveUsed"
+$txtCDriveFree             = Find-Control "TxtCDriveFree"
+$progressCDrive            = Find-Control "ProgressCDrive"
+$txtCBarPercent            = Find-Control "TxtCBarPercent"
+$txtCBarStatus             = Find-Control "TxtCBarStatus"
+$txtCReclaimable           = Find-Control "TxtCReclaimable"
+$btnTopRefresh             = Find-Control "BtnTopRefresh"
+$btnTopQuickScan           = Find-Control "BtnTopQuickScan"
 
-# Cleanup Controls
-$btnSelectRec    = Find-Control "BtnSelectRecommended"
-$btnSelectAll    = Find-Control "BtnSelectAll"
-$btnClearSel     = Find-Control "BtnClearSelection"
-$txtCleanBadge   = Find-Control "TxtCleanTotalBadge"
-$btnScanClean    = Find-Control "BtnScanCleanable"
-$btnRunCleanup   = Find-Control "BtnRunCleanup"
+# Tab 1: C: Junk Cleaner Controls
+$btnSelectRec              = Find-Control "BtnSelectRecommended"
+$btnSelectAll              = Find-Control "BtnSelectAll"
+$btnClearSel               = Find-Control "BtnClearSelection"
+$btnFilterAll              = Find-Control "BtnFilterAll"
+$btnFilterSys              = Find-Control "BtnFilterSystem"
+$btnFilterDev              = Find-Control "BtnFilterDev"
+$btnFilterBrowser          = Find-Control "BtnFilterBrowser"
+$txtCleanBadge             = Find-Control "TxtCleanSelectedBadge"
+$btnScanClean              = Find-Control "BtnScanCleanable"
+$btnRunCleanup             = Find-Control "BtnRunCleanup"
+$gridCleanCategories       = Find-Control "GridCleanableCategories"
+$txtSelectedCatInfo        = Find-Control "TxtSelectedCategoryInfo"
+$txtSelectedCatDesc        = Find-Control "TxtSelectedCategoryDesc"
+$btnOpenCatInExplorer      = Find-Control "BtnOpenCategoryInExplorer"
+$btnInspectCatFiles        = Find-Control "BtnInspectCategoryFiles"
+$btnCleanSingleCategory    = Find-Control "BtnCleanSingleCategory"
 
-$chkUserTemp     = Find-Control "ChkUserTemp"
-$chkSysTemp      = Find-Control "ChkSysTemp"
-$chkCrashDumps   = Find-Control "ChkCrashDumps"
-$chkWerLogs      = Find-Control "ChkWerLogs"
-$chkPipCache     = Find-Control "ChkPipCache"
-$chkPipDCache    = Find-Control "ChkPipDCache"
-$chkNpmCache     = Find-Control "ChkNpmCache"
-$chkPyCache      = Find-Control "ChkPyCache"
-$chkChromeCache  = Find-Control "ChkChromeCache"
-$chkEdgeCache    = Find-Control "ChkEdgeCache"
-$chkBraveCache   = Find-Control "ChkBraveCache"
-$chkRecycleBin   = Find-Control "ChkRecycleBin"
-$chkOldDownloads = Find-Control "ChkOldDownloads"
+# Tab 2: File Inspector Controls
+$cmbInspectTarget          = Find-Control "CmbInspectTarget"
+$btnRefreshInspectFiles    = Find-Control "BtnRefreshInspectFiles"
+$txtInspectSummary         = Find-Control "TxtInspectSummary"
+$gridInspectFiles          = Find-Control "GridInspectFiles"
+$txtSelectedInspectInfo    = Find-Control "TxtSelectedInspectFileInfo"
+$btnRevealInspectFile      = Find-Control "BtnRevealInspectFileInExplorer"
+$btnDeleteInspectFile      = Find-Control "BtnDeleteSingleInspectFile"
+$btnPurgeAllInspect        = Find-Control "BtnPurgeAllInspectFiles"
 
-# Hunter Controls
-$cmbHuntDrive    = Find-Control "CmbHunterDrive"
-$cmbHuntSize     = Find-Control "CmbHunterSize"
-$cmbHuntCat      = Find-Control "CmbHunterCategory"
-$btnHuntScan     = Find-Control "BtnStartHunterScan"
-$gridLargeFiles  = Find-Control "GridLargeFiles"
-$txtSelected     = Find-Control "TxtSelectedFileInfo"
-$btnReveal       = Find-Control "BtnRevealInExplorer"
-$btnTrash        = Find-Control "BtnSendToTrash"
-$btnPermDelete   = Find-Control "BtnPermanentDelete"
+# Tab 3: Hunter Controls
+$cmbHuntSize               = Find-Control "CmbHunterSize"
+$cmbHuntCat                = Find-Control "CmbHunterCategory"
+$btnHuntScan               = Find-Control "BtnStartHunterScan"
+$gridLargeFiles            = Find-Control "GridLargeFiles"
+$txtSelectedLargeFile      = Find-Control "TxtSelectedFileInfo"
+$btnRevealLargeFile        = Find-Control "BtnRevealInExplorer"
+$btnTrashLargeFile         = Find-Control "BtnSendToTrash"
+$btnPermDeleteLargeFile    = Find-Control "BtnPermanentDelete"
 
-# Explorer Controls
-$cmbExpDrive     = Find-Control "CmbExplorerDrive"
-$btnFolderUp     = Find-Control "BtnFolderUp"
-$txtPath         = Find-Control "TxtCurrentPath"
-$btnScanDir      = Find-Control "BtnScanCurrentDir"
-$gridDir         = Find-Control "GridDirectories"
+# Tab 4: Directory Explorer Controls
+$btnFolderUp               = Find-Control "BtnFolderUp"
+$txtPath                   = Find-Control "TxtCurrentPath"
+$btnScanDir                = Find-Control "BtnScanCurrentDir"
+$btnOpenDirInExplorer      = Find-Control "BtnOpenCurrentInExplorer"
+$gridDir                   = Find-Control "GridDirectories"
 
-# State
+# Internal State
 $global:CurrentExplorerPath = "C:\"
-$global:ScannedCleanableTargets = @{}
+$global:ScannedCleanupItems = [System.Collections.ArrayList]@()
+$global:CurrentFilterGroup  = "All"
 
-# Load Drives
-function Load-DrivesOverview {
-    Log-Console "Enumerating physical and logical storage volumes..."
-    $panelCards.Children.Clear()
-    $cmbExpDrive.Items.Clear()
-    $cmbHuntDrive.Items.Clear()
-
-    $metrics = Get-DriveMetrics
-    $totalSysBytes = 0
-    $totalFreeBytes = 0
-
-    foreach ($m in $metrics) {
-        $totalSysBytes += $m.RawTotal
-        $totalFreeBytes += $m.RawFree
-
-        $cmbExpDrive.Items.Add("$($m.DriveLetter)\") | Out-Null
-        $cmbHuntDrive.Items.Add("$($m.DriveLetter)\") | Out-Null
-
-        # Build clean WinUtil style Drive GroupBox
-        $cardXaml = @"
-        <GroupBox xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                  Header="$($m.DisplayName)" Width="310" Height="170" Margin="4" Foreground="#00B4D8" BorderBrush="#3F3F46" Background="#27272A">
-            <Grid Margin="6,4">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="Auto"/>
-                </Grid.RowDefinitions>
-
-                <Grid Grid.Row="0">
-                    <TextBlock Text="File System: $($m.FileSystem)" FontSize="11" Foreground="#A1A1AA" HorizontalAlignment="Left"/>
-                    <TextBlock Text="$($m.StatusText)" FontSize="11" FontWeight="Bold" Foreground="$($m.StatusColor)" HorizontalAlignment="Right"/>
-                </Grid>
-
-                <StackPanel Grid.Row="1" Margin="0,8,0,0">
-                    <Grid>
-                        <TextBlock Text="$($m.UsedGB) GB used ($($m.UsedPercent)%)" FontSize="11" FontWeight="SemiBold" Foreground="#FFFFFF" HorizontalAlignment="Left"/>
-                        <TextBlock Text="$($m.FreeGB) GB free" FontSize="11" Foreground="#2EC4B6" HorizontalAlignment="Right"/>
-                    </Grid>
-                    <ProgressBar Height="8" Margin="0,4,0,0" Value="$($m.UsedPercent)" Maximum="100" Background="#18181B" Foreground="$($m.StatusColor)" BorderThickness="0"/>
-                </StackPanel>
-
-                <Grid Grid.Row="3" Margin="0,8,0,0">
-                    <Button Tag="$($m.DriveLetter)\" Content="Inspect in Explorer" Height="26" FontSize="11" Background="#333338" Foreground="#00B4D8" BorderBrush="#4F4F56" Cursor="Hand"/>
-                </Grid>
-            </Grid>
-        </GroupBox>
-"@
-        $cardReader = New-Object System.Xml.XmlNodeReader ([xml]$cardXaml)
-        $cardElement = [System.Windows.Markup.XamlReader]::Load($cardReader)
-
-        $btnInspect = $cardElement.Content.Children[2].Children[0]
-        $btnInspect.add_Click({
-            param($sender, $e)
-            $global:CurrentExplorerPath = $sender.Tag
-            $cmbExpDrive.SelectedItem = $sender.Tag
-            Load-Directory $global:CurrentExplorerPath
-            # Switch to explorer tab
-            $tabCtrl = $window.Content.Children[1]
-            $tabCtrl.SelectedIndex = 3
-        })
-
-        $panelCards.Children.Add($cardElement) | Out-Null
-        Log-Console "Discovered Drive $($m.DriveLetter) [$($m.VolumeLabel)]: $($m.UsedGB) GB / $($m.TotalGB) GB ($($m.FreeGB) GB free)"
+# Function: Update C: Drive Metrics Display
+function Update-CDriveMetricsDisplay {
+    $cMetrics = Get-CDriveMetrics
+    if ($cMetrics) {
+        $txtCDriveTotal.Text = "$($cMetrics.TotalGB) GB"
+        $txtCDriveUsed.Text  = "$($cMetrics.UsedGB) GB"
+        $txtCDriveFree.Text  = "$($cMetrics.FreeGB) GB"
+        $progressCDrive.Value = $cMetrics.UsedPercent
+        $txtCBarPercent.Text = "$($cMetrics.UsedPercent)% Used ($($cMetrics.StatusText))"
+        $txtCBarStatus.Text  = "Drive C: [$($cMetrics.VolumeLabel)] ($($cMetrics.FileSystem))"
+        
+        $txtGlobalStat.Text  = "C: Drive Status: $($cMetrics.FreeGB) GB Free of $($cMetrics.TotalGB) GB ($($cMetrics.StatusText))"
+        Log-Console "C: Drive Status: $($cMetrics.UsedGB) GB used / $($cMetrics.TotalGB) GB total ($($cMetrics.FreeGB) GB free)"
     }
-
-    $txtTotalStorage.Text = Format-Bytes -Bytes $totalSysBytes
-    $txtTotalFree.Text    = Format-Bytes -Bytes $totalFreeBytes
-
-    if ($cmbExpDrive.Items.Count -gt 0) { $cmbExpDrive.SelectedIndex = 0 }
-    if ($cmbHuntDrive.Items.Count -gt 0) { $cmbHuntDrive.SelectedIndex = 0 }
-
-    $txtGlobalStat.Text = "Ready | Discovered $($metrics.Count) mounted partitions."
 }
 
-# Explorer: Load Directory
-function Load-Directory {
-    param([string]$Path)
-    Log-Console "Scanning folder: $Path"
-    $txtPath.Text = $Path
-    $global:CurrentExplorerPath = $Path
-
-    $items = Start-FolderScan -DirectoryPath $Path
-    $gridDir.ItemsSource = $items
-    Log-Console "Loaded $($items.Count) items in $Path" "SUCCESS"
+# Function: Recalculate Selected Total Badge
+function Update-SelectedCleanupBadge {
+    $totalSelectedBytes = 0
+    $selectedCount = 0
+    
+    foreach ($item in $global:ScannedCleanupItems) {
+        if ($item.IsSelected -eq $true) {
+            $totalSelectedBytes += $item.RawBytes
+            $selectedCount++
+        }
+    }
+    
+    $txtCleanBadge.Text = "Selected: $(Format-Bytes -Bytes $totalSelectedBytes) ($selectedCount categories)"
 }
 
-# Cleanup: Checkbox Selection helpers
+# Function: Apply Filter on Cleanable Grid
+function Apply-CleanupFilter {
+    param([string]$Group)
+    $global:CurrentFilterGroup = $Group
+    
+    if ($Group -eq "All") {
+        $gridCleanCategories.ItemsSource = $global:ScannedCleanupItems
+    } else {
+        $filtered = $global:ScannedCleanupItems | Where-Object { $_.Group -like "*$Group*" }
+        $gridCleanCategories.ItemsSource = [System.Collections.ArrayList]@($filtered)
+    }
+}
+
+# Function: Scan C: Drive Junk
+function Start-ScanCJunk {
+    Log-Console "Scanning C: drive for unnecessary files, caches, logs, and trash..."
+    $items = Scan-SmartCleanupItems
+    
+    $global:ScannedCleanupItems = [System.Collections.ArrayList]@($items)
+    Apply-CleanupFilter $global:CurrentFilterGroup
+    
+    # Update Inspect dropdown
+    $cmbInspectTarget.Items.Clear()
+    $totalReclaimable = 0
+    
+    foreach ($item in $items) {
+        $totalReclaimable += $item.RawBytes
+        $cmbInspectTarget.Items.Add("$($item.Id) - $($item.CategoryName)") | Out-Null
+        
+        if ($item.RawBytes -gt 0) {
+            Log-Console "Detected $($item.CategoryName): $($item.DisplaySize) ($($item.FileCount)) at $($item.Target)"
+        }
+    }
+    
+    if ($cmbInspectTarget.Items.Count -gt 0) {
+        $cmbInspectTarget.SelectedIndex = 0
+    }
+    
+    $txtCReclaimable.Text = "~$(Format-Bytes -Bytes $totalReclaimable)"
+    Update-SelectedCleanupBadge
+    Log-Console "Scan complete! Total reclaimable junk on C: drive: $(Format-Bytes -Bytes $totalReclaimable)" "SUCCESS"
+}
+
+# Selection Presets
 $btnSelectRec.add_Click({
-    $chkUserTemp.IsChecked = $true
-    $chkSysTemp.IsChecked = $true
-    $chkCrashDumps.IsChecked = $true
-    $chkWerLogs.IsChecked = $true
-    $chkPipCache.IsChecked = $true
-    $chkPipDCache.IsChecked = $true
-    $chkNpmCache.IsChecked = $true
-    $chkPyCache.IsChecked = $true
-    $chkChromeCache.IsChecked = $true
-    $chkEdgeCache.IsChecked = $true
-    $chkBraveCache.IsChecked = $false
-    $chkRecycleBin.IsChecked = $true
-    $chkOldDownloads.IsChecked = $false
-    Log-Console "Applied recommended cleanup presets."
+    foreach ($item in $global:ScannedCleanupItems) {
+        $item.IsSelected = ($item.Recommended -and $item.RawBytes -gt 0)
+    }
+    $gridCleanCategories.Items.Refresh()
+    Update-SelectedCleanupBadge
+    Log-Console "Applied recommended cleanup selection preset."
 })
 
 $btnSelectAll.add_Click({
-    $chkUserTemp.IsChecked = $true
-    $chkSysTemp.IsChecked = $true
-    $chkCrashDumps.IsChecked = $true
-    $chkWerLogs.IsChecked = $true
-    $chkPipCache.IsChecked = $true
-    $chkPipDCache.IsChecked = $true
-    $chkNpmCache.IsChecked = $true
-    $chkPyCache.IsChecked = $true
-    $chkChromeCache.IsChecked = $true
-    $chkEdgeCache.IsChecked = $true
-    $chkBraveCache.IsChecked = $true
-    $chkRecycleBin.IsChecked = $true
-    $chkOldDownloads.IsChecked = $true
-    Log-Console "Selected all cleanup items."
+    foreach ($item in $global:ScannedCleanupItems) {
+        $item.IsSelected = ($item.RawBytes -gt 0)
+    }
+    $gridCleanCategories.Items.Refresh()
+    Update-SelectedCleanupBadge
+    Log-Console "Selected all available C: junk categories."
 })
 
 $btnClearSel.add_Click({
-    $chkUserTemp.IsChecked = $false
-    $chkSysTemp.IsChecked = $false
-    $chkCrashDumps.IsChecked = $false
-    $chkWerLogs.IsChecked = $false
-    $chkPipCache.IsChecked = $false
-    $chkPipDCache.IsChecked = $false
-    $chkNpmCache.IsChecked = $false
-    $chkPyCache.IsChecked = $false
-    $chkChromeCache.IsChecked = $false
-    $chkEdgeCache.IsChecked = $false
-    $chkBraveCache.IsChecked = $false
-    $chkRecycleBin.IsChecked = $false
-    $chkOldDownloads.IsChecked = $false
-    Log-Console "Cleared cleanup selection."
+    foreach ($item in $global:ScannedCleanupItems) {
+        $item.IsSelected = $false
+    }
+    $gridCleanCategories.Items.Refresh()
+    Update-SelectedCleanupBadge
+    Log-Console "Cleared all selections."
 })
 
-# Scan Cleanable Items
-function Start-AnalyzeStorageJunk {
-    Log-Console "Starting deep storage cleanup scan across all drives..."
-    $items = Scan-SmartCleanupItems
+# Filter Chips
+$btnFilterAll.add_Click({ Apply-CleanupFilter "All" })
+$btnFilterSys.add_Click({ Apply-CleanupFilter "Windows & System" })
+$btnFilterDev.add_Click({ Apply-CleanupFilter "Developer" })
+$btnFilterBrowser.add_Click({ Apply-CleanupFilter "Browser" })
+
+# Category Selection Changed in Grid
+$gridCleanCategories.add_SelectionChanged({
+    $sel = $gridCleanCategories.SelectedItem
+    if ($sel) {
+        $txtSelectedCatInfo.Text = "$($sel.DisplayName) - Size: $($sel.DisplaySize) ($($sel.FileCount))"
+        $txtSelectedCatDesc.Text = "$($sel.Description)"
+        Update-SelectedCleanupBadge
+    }
+})
+
+# 1. Action: Open in File Explorer (User Key Requirement)
+$btnOpenCatInExplorer.add_Click({
+    $sel = $gridCleanCategories.SelectedItem
+    if (-not $sel) {
+        [System.Windows.MessageBox]::Show("Please select a junk category to open in File Explorer.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+        return
+    }
     
-    $totalFound = 0
-    foreach ($item in $items) {
-        $global:ScannedCleanableTargets[$item.Id] = $item
-        $totalFound += $item.RawBytes
-        if ($item.RawBytes -gt 0) {
-            Log-Console "Found $($item.CategoryName): $($item.DisplaySize) ($($item.FileCount))"
+    if ($sel.Type -eq "RecycleBin") {
+        Start-Process "explorer.exe" -ArgumentList "shell:RecycleBinFolder"
+        Log-Console "Opened Windows Recycle Bin in File Explorer." "SUCCESS"
+    } else {
+        $opened = Open-FolderInExplorer -Path $sel.Target
+        if ($opened) {
+            Log-Console "Opened in File Explorer: $($sel.Target)" "SUCCESS"
+        } else {
+            Log-Console "Folder does not exist or is currently empty: $($sel.Target)" "WARN"
+            [System.Windows.MessageBox]::Show("The target folder ($($sel.Target)) does not exist or has no files.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
         }
     }
+})
 
-    $txtCleanBadge.Text = "Reclaimable: $(Format-Bytes -Bytes $totalFound)"
-    $txtReclaimable.Text = "~$(Format-Bytes -Bytes $totalFound)"
-    Log-Console "Storage analysis complete. Total reclaimable: $(Format-Bytes -Bytes $totalFound)" "SUCCESS"
-}
+# 2. Action: Inspect Category Files (Switch to File Inspector Tab)
+$btnInspectCatFiles.add_Click({
+    $sel = $gridCleanCategories.SelectedItem
+    if (-not $sel) {
+        [System.Windows.MessageBox]::Show("Please select a category to inspect its files.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+        return
+    }
+    
+    # Match in dropdown
+    for ($i = 0; $i -lt $cmbInspectTarget.Items.Count; $i++) {
+        if ($cmbInspectTarget.Items[$i] -like "$($sel.Id)*") {
+            $cmbInspectTarget.SelectedIndex = $i
+            break
+        }
+    }
+    
+    # Switch tab to File Inspector (Index 1)
+    $mainTabControl.SelectedIndex = 1
+    # Trigger load files
+    $btnRefreshInspectFiles.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+})
 
-$btnScanClean.add_Click({ Start-AnalyzeStorageJunk })
-
-# Run Cleanup
+# 3. Action: Clean Selected Junk (Bulk)
 $btnRunCleanup.add_Click({
     $targetsToClean = @()
-    $allItems = Scan-SmartCleanupItems
-
-    $checkboxMap = @{
-        "UserTemp"        = $chkUserTemp.IsChecked
-        "SystemTemp"      = $chkSysTemp.IsChecked
-        "CrashDumps"      = $chkCrashDumps.IsChecked
-        "WERLogs"         = $chkWerLogs.IsChecked
-        "PipCache"        = $chkPipCache.IsChecked
-        "PipCustomCache"  = $chkPipDCache.IsChecked
-        "NpmCache"        = $chkNpmCache.IsChecked
-        "ChromeCache"     = $chkChromeCache.IsChecked
-        "EdgeCache"       = $chkEdgeCache.IsChecked
-        "RecycleBin"      = $chkRecycleBin.IsChecked
-    }
-
-    foreach ($item in $allItems) {
-        if ($checkboxMap[$item.Id] -eq $true) {
-            $item.IsSelected = $true
+    foreach ($item in $global:ScannedCleanupItems) {
+        if ($item.IsSelected -eq $true -and $item.RawBytes -gt 0) {
             $targetsToClean += $item
         }
     }
 
     if ($targetsToClean.Count -eq 0) {
-        [System.Windows.MessageBox]::Show("Please select at least one item to clean.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+        [System.Windows.MessageBox]::Show("No items are selected for cleanup.`n`nPlease check the boxes next to the categories you want to clean.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
         return
     }
 
     $totalBytes = ($targetsToClean | Measure-Object -Property RawBytes -Sum).Sum
     $confirm = [System.Windows.MessageBox]::Show(
-        "Proceed with cleaning $(Format-Bytes -Bytes $totalBytes) across $($targetsToClean.Count) selected categories?",
-        "Confirm WinUtil Cleanup",
+        "Proceed with cleaning $(Format-Bytes -Bytes $totalBytes) across $($targetsToClean.Count) selected C: drive junk categories?`n`nDiskman will safely remove unnecessary cache files and purge trash.",
+        "Confirm C: Drive Cleanup",
         [System.Windows.MessageBoxButton]::YesNo,
         [System.Windows.MessageBoxImage]::Warning
     )
 
     if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
-        Log-Console "Executing cleanup sequence..."
+        Log-Console "Executing C: Drive cleanup sequence..."
         $res = Invoke-ExecuteCleanup -SelectedItems $targetsToClean
         foreach ($log in $res.Logs) {
             Log-Console $log "SUCCESS"
@@ -1357,37 +1712,151 @@ $btnRunCleanup.add_Click({
         Log-Console "Cleanup finished! Total space freed: $($res.DisplayFreed) ($($res.DeletedCount) items purged)" "SUCCESS"
         
         [System.Windows.MessageBox]::Show(
-            "Cleanup Complete!`n`nFreed Space: $($res.DisplayFreed)`nPurged Items: $($res.DeletedCount)",
-            "Diskman - Storage Cleaned",
+            "C: Drive Cleanup Complete!`n`nFreed Space: $($res.DisplayFreed)`nPurged Items: $($res.DeletedCount)",
+            "Diskman - C: Drive Cleaned",
             [System.Windows.MessageBoxButton]::OK,
             [System.Windows.MessageBoxImage]::Information
         )
 
-        Load-DrivesOverview
-        Start-AnalyzeStorageJunk
+        Update-CDriveMetricsDisplay
+        Start-ScanCJunk
     }
 })
 
-# Large File Hunter Setup
+# 4. Action: Clean Single Category
+$btnCleanSingleCategory.add_Click({
+    $sel = $gridCleanCategories.SelectedItem
+    if (-not $sel) {
+        [System.Windows.MessageBox]::Show("Please select a category to clean.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+        return
+    }
+
+    if ($sel.RawBytes -le 0) {
+        [System.Windows.MessageBox]::Show("The selected category ($($sel.CategoryName)) is already empty.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+        return
+    }
+
+    $confirm = [System.Windows.MessageBox]::Show(
+        "Clean all files in '$($sel.CategoryName)' ($($sel.DisplaySize))?`n`nLocation: $($sel.Target)",
+        "Confirm Category Cleanup",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Question
+    )
+
+    if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
+        Log-Console "Purging category: $($sel.CategoryName)..."
+        $res = Invoke-ExecuteCategoryCleanup -TargetId $sel.Id
+        foreach ($log in $res.Logs) {
+            Log-Console $log "SUCCESS"
+        }
+        [System.Windows.MessageBox]::Show(
+            "Category Cleaned: $($sel.CategoryName)`nFreed Space: $($res.DisplayFreed)",
+            "Diskman",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        )
+        Update-CDriveMetricsDisplay
+        Start-ScanCJunk
+    }
+})
+
+# Tab 2: File Inspector Logic
+$btnRefreshInspectFiles.add_Click({
+    $selTargetStr = $cmbInspectTarget.SelectedItem
+    if (-not $selTargetStr) { return }
+    
+    $targetId = ($selTargetStr -split " - ")[0].Trim()
+    Log-Console "Loading file list for $targetId..."
+    
+    $files = Get-CleanableCategoryFiles -TargetId $targetId -Limit 250
+    $gridInspectFiles.ItemsSource = $files
+    
+    $totalInspectBytes = ($files | Measure-Object -Property RawBytes -Sum).Sum
+    if (-not $totalInspectBytes) { $totalInspectBytes = 0 }
+    
+    $txtInspectSummary.Text = "Loaded $($files.Count) files (Total: $(Format-Bytes -Bytes $totalInspectBytes))"
+    Log-Console "Loaded $($files.Count) files for $targetId ($(Format-Bytes -Bytes $totalInspectBytes))" "SUCCESS"
+})
+
+$gridInspectFiles.add_SelectionChanged({
+    $sel = $gridInspectFiles.SelectedItem
+    if ($sel) {
+        $txtSelectedInspectInfo.Text = "$($sel.Name) ($($sel.DisplaySize)) - Path: $($sel.FullPath)"
+    } else {
+        $txtSelectedInspectInfo.Text = "Select a file to inspect or delete."
+    }
+})
+
+$btnRevealInspectFile.add_Click({
+    $sel = $gridInspectFiles.SelectedItem
+    if ($sel -and (Test-Path -LiteralPath $sel.FullPath)) {
+        Show-ItemInExplorer -Path $sel.FullPath
+        Log-Console "Revealed in File Explorer: $($sel.FullPath)" "SUCCESS"
+    } else {
+        [System.Windows.MessageBox]::Show("Please select a valid file to reveal.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+    }
+})
+
+$btnDeleteSingleInspectFile.add_Click({
+    $sel = $gridInspectFiles.SelectedItem
+    if ($sel -and (Test-Path -LiteralPath $sel.FullPath)) {
+        $confirm = [System.Windows.MessageBox]::Show(
+            "Delete file '$($sel.Name)' ($($sel.DisplaySize))?`n`nPath: $($sel.FullPath)",
+            "Confirm File Delete",
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Question
+        )
+        if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
+            $res = Remove-ItemPermanently -Path $sel.FullPath
+            if ($res.Success) {
+                Log-Console "Deleted file: $($sel.FullPath)" "SUCCESS"
+                $btnRefreshInspectFiles.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+                Update-CDriveMetricsDisplay
+            } else {
+                Log-Console "Failed to delete file: $($res.Message)" "ERROR"
+                [System.Windows.MessageBox]::Show($res.Message, "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+            }
+        }
+    }
+})
+
+$btnPurgeAllInspect.add_Click({
+    $selTargetStr = $cmbInspectTarget.SelectedItem
+    if (-not $selTargetStr) { return }
+    $targetId = ($selTargetStr -split " - ")[0].Trim()
+    
+    $confirm = [System.Windows.MessageBox]::Show(
+        "Clear all files currently inspected in '$selTargetStr'?",
+        "Confirm Clear All",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning
+    )
+    if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
+        $res = Invoke-ExecuteCategoryCleanup -TargetId $targetId
+        Log-Console "Cleared category: $targetId (Freed: $($res.DisplayFreed))" "SUCCESS"
+        $btnRefreshInspectFiles.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Update-CDriveMetricsDisplay
+        Start-ScanCJunk
+    }
+})
+
+# Tab 3: Large File Hunter Setup
 $cmbHuntSize.Items.Add("> 100 MB") | Out-Null
 $cmbHuntSize.Items.Add("> 500 MB") | Out-Null
 $cmbHuntSize.Items.Add("> 1 GB")   | Out-Null
 $cmbHuntSize.Items.Add("> 5 GB")   | Out-Null
 $cmbHuntSize.SelectedIndex = 0
 
-$cmbHuntCat.Items.Add("All Categories") | Out-Null
-$cmbHuntCat.Items.Add("Video")          | Out-Null
-$cmbHuntCat.Items.Add("Archive")        | Out-Null
-$cmbHuntCat.Items.Add("AI Model")       | Out-Null
-$cmbHuntCat.Items.Add("Disk Image")     | Out-Null
-$cmbHuntCat.Items.Add("Executable")     | Out-Null
-$cmbHuntCat.Items.Add("Dataset")        | Out-Null
+$cmbHuntCat.Items.Add("All Categories")        | Out-Null
+$cmbHuntCat.Items.Add("Installer / Package")   | Out-Null
+$cmbHuntCat.Items.Add("Disk Image / ISO")      | Out-Null
+$cmbHuntCat.Items.Add("Archive / Zip")         | Out-Null
+$cmbHuntCat.Items.Add("Video / Media")         | Out-Null
+$cmbHuntCat.Items.Add("Log / Dump File")       | Out-Null
+$cmbHuntCat.Items.Add("AI Model / Weights")    | Out-Null
 $cmbHuntCat.SelectedIndex = 0
 
 $btnHuntScan.add_Click({
-    $drive = $cmbHuntDrive.SelectedItem
-    if (-not $drive) { $drive = "C:\" }
-
     $sizeMap = @{
         "> 100 MB" = 100MB
         "> 500 MB" = 500MB
@@ -1398,31 +1867,31 @@ $btnHuntScan.add_Click({
     if (-not $minSize) { $minSize = 100MB }
 
     $cat = $cmbHuntCat.SelectedItem
-    Log-Console "Scanning for large files in $drive ($($cmbHuntSize.SelectedItem) | $cat)..."
+    Log-Console "Hunting large unnecessary files in C:\ ($($cmbHuntSize.SelectedItem) | $cat)..."
 
-    $files = Find-LargeFiles -TargetPath $drive -MinSizeBytes $minSize -CategoryFilter $cat -Limit 60
+    $files = Find-LargeFiles -TargetPath "C:\" -MinSizeBytes $minSize -CategoryFilter $cat -Limit 100
     $gridLargeFiles.ItemsSource = $files
-    Log-Console "Found $($files.Count) matching large files in $drive." "SUCCESS"
+    Log-Console "Discovered $($files.Count) large files on C: drive." "SUCCESS"
 })
 
 $gridLargeFiles.add_SelectionChanged({
     $sel = $gridLargeFiles.SelectedItem
     if ($sel) {
-        $txtSelected.Text = "$($sel.Name) ($($sel.DisplaySize))"
+        $txtSelectedLargeFile.Text = "$($sel.Name) ($($sel.DisplaySize))"
     } else {
-        $txtSelected.Text = "Select a file to perform action."
+        $txtSelectedLargeFile.Text = "Select a large file to perform action."
     }
 })
 
-$btnReveal.add_Click({
+$btnRevealLargeFile.add_Click({
     $sel = $gridLargeFiles.SelectedItem
     if ($sel -and (Test-Path -LiteralPath $sel.FullPath)) {
         Show-ItemInExplorer -Path $sel.FullPath
-        Log-Console "Revealed file in Windows Explorer: $($sel.FullPath)"
+        Log-Console "Revealed file in File Explorer: $($sel.FullPath)" "SUCCESS"
     }
 })
 
-$btnTrash.add_Click({
+$btnTrashLargeFile.add_Click({
     $sel = $gridLargeFiles.SelectedItem
     if ($sel -and (Test-Path -LiteralPath $sel.FullPath)) {
         $confirm = [System.Windows.MessageBox]::Show(
@@ -1436,11 +1905,12 @@ $btnTrash.add_Click({
             Log-Console "Recycled file: $($sel.FullPath)" "SUCCESS"
             [System.Windows.MessageBox]::Show($res.Message, "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
             $btnHuntScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            Update-CDriveMetricsDisplay
         }
     }
 })
 
-$btnPermDelete.add_Click({
+$btnPermDeleteLargeFile.add_Click({
     $sel = $gridLargeFiles.SelectedItem
     if ($sel -and (Test-Path -LiteralPath $sel.FullPath)) {
         $confirm = [System.Windows.MessageBox]::Show(
@@ -1454,29 +1924,33 @@ $btnPermDelete.add_Click({
             Log-Console "Deleted file: $($sel.FullPath)" "WARN"
             [System.Windows.MessageBox]::Show($res.Message, "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
             $btnHuntScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            Update-CDriveMetricsDisplay
         }
     }
 })
 
-# Explorer Events
-$btnTopRefresh.add_Click({ Load-DrivesOverview })
-$btnTopQuickScan.add_Click({
-    $tabCtrl = $window.Content.Children[1]
-    $tabCtrl.SelectedIndex = 1
-    Start-AnalyzeStorageJunk
-})
+# Tab 4: Directory Explorer Setup
+function Load-Directory {
+    param([string]$Path)
+    Log-Console "Scanning C: directory: $Path"
+    $txtPath.Text = $Path
+    $global:CurrentExplorerPath = $Path
+
+    $items = Start-FolderScan -DirectoryPath $Path
+    $gridDir.ItemsSource = $items
+    Log-Console "Loaded $($items.Count) items in $Path" "SUCCESS"
+}
 
 $btnScanDir.add_Click({ Load-Directory $txtPath.Text })
-$cmbExpDrive.add_SelectionChanged({
-    if ($cmbExpDrive.SelectedItem) {
-        Load-Directory $cmbExpDrive.SelectedItem
-    }
-})
 $btnFolderUp.add_Click({
     $parent = Split-Path -Parent $global:CurrentExplorerPath
     if (-not [string]::IsNullOrWhiteSpace($parent)) {
         Load-Directory $parent
     }
+})
+$btnOpenDirInExplorer.add_Click({
+    Open-FolderInExplorer -Path $global:CurrentExplorerPath
+    Log-Console "Opened in File Explorer: $global:CurrentExplorerPath" "SUCCESS"
 })
 $gridDir.add_MouseDoubleClick({
     $selected = $gridDir.SelectedItem
@@ -1485,13 +1959,25 @@ $gridDir.add_MouseDoubleClick({
     }
 })
 
-# Initial Startup
-Log-Console "================================================="
-Log-Console "Diskman Windows Storage Utility initialized."
-Log-Console "Inspired by ChrisTitusTech/winutil architecture."
-Log-Console "================================================="
+# Top Header Actions
+$btnTopRefresh.add_Click({
+    Update-CDriveMetricsDisplay
+    Start-ScanCJunk
+})
+$btnTopQuickScan.add_Click({
+    $mainTabControl.SelectedIndex = 0
+    Start-ScanCJunk
+})
+$btnScanClean.add_Click({ Start-ScanCJunk })
 
-Load-DrivesOverview
+# Initial Startup
+Log-Console "=========================================================="
+Log-Console "Diskman - Dedicated C: Drive Trash & Storage Cleaner ready."
+Log-Console "Zero external dependencies | PowerShell + WPF Native Engine"
+Log-Console "=========================================================="
+
+Update-CDriveMetricsDisplay
+Start-ScanCJunk
 Load-Directory "C:\"
 
 # Show Window

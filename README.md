@@ -1,26 +1,27 @@
-﻿# ⚡ Diskman - Modern Windows Storage Analyzer & Smart Storage Cleaner
+# ⚡ Diskman - C: Drive Trash & Smart Storage Cleaner
 
-> A blazing-fast, modern, zero-dependency Windows storage explorer and smart cleaner built on **PowerShell + WPF (XAML)**, inspired by the architecture of [`ChrisTitusTech/winutil`](https://github.com/ChrisTitusTech/winutil).
+> A blazing-fast, modern, zero-dependency Windows C: drive trash hunter and storage cleaner built on **PowerShell + WPF (XAML)**.
 
 ---
 
 ## 🌟 Highlights
 
-- 🚀 **Zero Dependencies & Zero Installation**: Runs natively on 100% of Windows 10 & 11 computers out of the box (no Python, Node.js, or `.exe` installers required).
-- 📊 **Real-time Drive Visualizer**: Live disk capacity meters, health indicators, and free space trackers for all mounted partitions (`C:`, `D:`, `E:`, USB drives).
-- 📂 **Interactive Directory Drilldown**: Deep dive into subfolders with breadcrumb navigation, size percentages, and instant file counts.
-- 🧹 **Smart One-Click Cleaner**: Safe purge of Windows temp files, developer caches (`pip`, `npm`, `yarn`, `__pycache__`), crash dumps, browser caches, and Windows Recycle Bin.
-- 🎯 **Large & Stale File Hunter**: Fast seeker for gigabyte-sized files (>100MB, >500MB, >1GB, >5GB) with media categorization (Videos, AI Models, ISOs, Archives, Installers) and direct **Reveal in File Explorer** / **Safe Recycle Bin** actions.
-- 🎨 **Modern Fluent Dark Design**: Custom XAML dark theme with rounded glassmorphism cards and smooth controls.
+- 🚀 **Dedicated C: Drive Junk Purger**: Deeply scans Drive `C:\` for unnecessary files, Windows update payloads, temporary caches, crash dumps, developer leftovers, browser data, and trash.
+- 📂 **Seamless Windows File Explorer Integration**: Inspect any detected junk category or individual file directly in Windows File Explorer before deciding to clear it out.
+- 🔍 **In-App File Inspector**: Drill down into any cleanable category within Diskman to view individual file names, paths, and sizes.
+- 🧹 **1-Click Smart Cleanup**: Bulk or single-category purge with safety locks that protect essential operating system files.
+- 🎯 **C: Large Junk Hunter**: Detects oversized installers (`.exe`, `.msi`, `.iso`), large archives, and leftover dumps consuming gigabytes on `C:\`.
+- 📊 **Real-time C: Drive Storage Visualizer**: Live capacity meter, used vs. free storage tracker, and estimated reclaimable space indicators.
+- 🎨 **Modern Fluent Dark Design**: Sleek dark UI with responsive controls, category filtering, and real-time execution logs.
 
 ---
 
 ## ⚡ 1-Click Launch (Online Distribution)
 
-Anyone on Windows can launch **Diskman** directly in an elevated PowerShell terminal with a single command:
+Launch **Diskman** directly in an elevated PowerShell terminal:
 
 ```powershell
-irm https://raw.githubusercontent.com/<your-username>/diskman/main/release/diskman.ps1 | iex
+irm https://raw.githubusercontent.com/Hackmaass/Diskman/main/release/diskman.ps1 | iex
 ```
 
 ---
@@ -39,6 +40,11 @@ Run the compiler script to generate the self-contained `release/diskman.ps1`:
 powershell -ExecutionPolicy Bypass -File .\Compile.ps1
 ```
 
+### 3. Run Automated Tests
+```powershell
+powershell -ExecutionPolicy Bypass -File .\test_verify.ps1
+```
+
 ---
 
 ## 📁 Project Structure
@@ -47,17 +53,19 @@ powershell -ExecutionPolicy Bypass -File .\Compile.ps1
 diskman/
 ├── src/
 │   ├── xaml/
-│   │   └── MainWindow.xaml          # Modern Fluent Dark WPF GUI
+│   │   └── MainWindow.xaml          # Modern Fluent Dark WPF GUI (C: Cleaner & Inspector)
 │   ├── modules/
-│   │   ├── Get-DriveMetrics.ps1     # Drive capacity, free space, and volume metadata
-│   │   ├── Start-FolderScan.ps1     # High-speed directory analyzer and drilldown
-│   │   ├── Invoke-SmartCleanup.ps1  # Smart cleaner (Temp, Pip/NPM cache, Logs, Recycle Bin)
-│   │   ├── Find-LargeFiles.ps1      # Large & stale file seeker
-│   │   └── Invoke-ShellActions.ps1  # Reveal in Explorer & Safe Recycle Bin integration
-│   └── app.ps1                      # Development bootstrapper
+│   │   ├── 00-Utils.ps1             # Formatting and metric helper utilities
+│   │   ├── Get-DriveMetrics.ps1     # C: Drive live capacity and health metrics
+│   │   ├── Invoke-SmartCleanup.ps1  # C: Junk scanning, file inspection, and safe purging
+│   │   ├── Invoke-ShellActions.ps1  # File Explorer reveal and safe recycle bin actions
+│   │   ├── Find-LargeFiles.ps1      # C: Large files and installers seeker
+│   │   └── Start-FolderScan.ps1     # High-speed directory analyzer and drilldown
+│   └── app.ps1                      # Development bootstrapper and UI controller
 ├── release/
-│   └── diskman.ps1                 # Standalone compiled distribution file
-├── Compile.ps1                      # WinUtil-style compiler
+│   └── diskman.ps1                  # Standalone compiled distribution file
+├── Compile.ps1                      # Packaging compiler
+├── test_verify.ps1                  # Automated verification test suite
 ├── run.bat                          # 1-click Windows launcher
 └── README.md
 ```
@@ -65,6 +73,6 @@ diskman/
 ---
 
 ## 🛡️ Safety & Privacy
-- **Safe Mode**: File deletions default to the **Windows Recycle Bin**.
-- **System Protection**: Critical OS roots (`C:\Windows`, `C:\Program Files`) are blacklisted from bulk deletion.
-- **100% Open Source**: No telemetry, no background daemons.
+- **Safety First**: Deletions default to safe cache purging and the **Windows Recycle Bin**.
+- **System Protection**: Critical OS roots (`C:\Windows`, `C:\Program Files`, `C:\Users`) are protected against accidental deletion.
+- **100% Zero-Telemetry**: No external network requests or background daemons.
