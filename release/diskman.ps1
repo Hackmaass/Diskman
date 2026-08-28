@@ -1493,9 +1493,9 @@ $btnRefreshInspectFiles    = Find-Control "BtnRefreshInspectFiles"
 $txtInspectSummary         = Find-Control "TxtInspectSummary"
 $gridInspectFiles          = Find-Control "GridInspectFiles"
 $txtSelectedInspectInfo    = Find-Control "TxtSelectedInspectFileInfo"
-$btnRevealInspectFile      = Find-Control "BtnRevealInspectFileInExplorer"
-$btnDeleteInspectFile      = Find-Control "BtnDeleteSingleInspectFile"
-$btnPurgeAllInspect        = Find-Control "BtnPurgeAllInspectFiles"
+$btnRevealInspectFile       = Find-Control "BtnRevealInspectFileInExplorer"
+$btnDeleteSingleInspectFile = Find-Control "BtnDeleteSingleInspectFile"
+$btnPurgeAllInspect         = Find-Control "BtnPurgeAllInspectFiles"
 
 # Tab 3: Hunter Controls
 $cmbHuntSize               = Find-Control "CmbHunterSize"
