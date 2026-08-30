@@ -98,7 +98,7 @@ Adding a new cache, log, or temp directory is straightforward! All targets are d
     Path          = (Join-Path $localAppData 'YourApp\Cache') # Absolute path to cache directory
     Description   = 'Brief description of what files are stored here'
     Type          = 'DirectoryContents'                  # 'DirectoryContents' (cleans inside folder) or 'RecycleBin'
-    SafetyLevel   = '100% Safe'                          # '100% Safe', 'Safe', or 'Optional'
+    SafetyLevel   = 'Safe'                               # 'Safe', 'Optional', or 'Advanced'
     Recommended   = $true                                # Whether this target is pre-selected by default
     RequiresAdmin = $false                               # True if deletion requires elevated Administrator privileges
 }

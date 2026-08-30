@@ -72,7 +72,7 @@ function Send-ItemToRecycleBin {
         }
         return @{ Success = $true; Message = "Item moved to Recycle Bin safely." }
     } catch {
-        return @{ Success = $false; Message = "Failed to recycle: $_" }
+        return @{ Success = $false; Message = "Failed to recycle: $($_.Exception.Message)" }
     }
 }
 
@@ -95,18 +95,18 @@ function Remove-ItemPermanently {
 
     try {
         if (Test-Path -LiteralPath $Path -PathType Container) {
-            [System.IO.Directory]::Delete($Path, $true)
+            $isReparse = Test-ReparsePoint -Path $Path
+            if ($isReparse) {
+                [System.IO.Directory]::Delete($Path, $false)
+            } else {
+                [System.IO.Directory]::Delete($Path, $true)
+            }
         } else {
             [System.IO.File]::SetAttributes($Path, [System.IO.FileAttributes]::Normal)
             [System.IO.File]::Delete($Path)
         }
         return @{ Success = $true; Message = "Item permanently deleted." }
     } catch {
-        try {
-            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
-            return @{ Success = $true; Message = "Item permanently deleted." }
-        } catch {
-            return @{ Success = $false; Message = "Delete failed: $_" }
-        }
+        return @{ Success = $false; Message = "Delete failed: $($_.Exception.Message)" }
     }
 }

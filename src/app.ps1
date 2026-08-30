@@ -198,7 +198,7 @@ function Start-ScanCJunk {
     
     $txtCReclaimable.Text = "~$(Format-Bytes -Bytes $totalReclaimable)"
     Update-SelectedCleanupBadge
-    Log-Console "Scan complete! Total reclaimable junk on C: drive: $(Format-Bytes -Bytes $totalReclaimable)" "SUCCESS"
+    Log-Console "Scan complete! Total reclaimable space on C: drive: $(Format-Bytes -Bytes $totalReclaimable)" "SUCCESS"
 }
 
 # Selection Presets
@@ -207,12 +207,12 @@ $btnSelectRec.add_Click({
         if ($item.RequiresAdmin -and -not $isAdmin) {
             $item.IsSelected = $false
         } else {
-            $item.IsSelected = ($item.Recommended -and $item.RawBytes -gt 0)
+            $item.IsSelected = ($item.Recommended -and $item.SafetyLevel -ne 'Advanced' -and $item.RawBytes -gt 0)
         }
     }
     $gridCleanCategories.Items.Refresh()
     Update-SelectedCleanupBadge
-    Log-Console "Applied recommended cleanup selection preset."
+    Log-Console "Applied recommended cleanup selection preset (Advanced targets excluded by default)."
 })
 
 $btnSelectAll.add_Click({
@@ -250,7 +250,7 @@ $gridCleanCategories.add_SelectionChanged({
     }
 })
 
-# 1. Action: Open in File Explorer (User Key Requirement)
+# 1. Action: Open in File Explorer
 $btnOpenCatInExplorer.add_Click({
     $sel = $gridCleanCategories.SelectedItem
     if (-not $sel) {
@@ -306,8 +306,14 @@ $btnRunCleanup.add_Click({
     }
 
     $totalBytes = ($targetsToClean | Measure-Object -Property RawBytes -Sum).Sum
+    $hasAdvanced = ($targetsToClean | Where-Object { $_.SafetyLevel -eq 'Advanced' -or $_.Id -in @('WinUpdateCache', 'DeliveryOpt') }).Count -gt 0
+    $advWarning = ""
+    if ($hasAdvanced) {
+        $advWarning = "`n`n[ADVANCED CLEANUP NOTICE]`nWindows Update Cache cleanup is selected. Diskman will verify that Windows Update and servicing components are idle before cleaning. Windows may need to re-download update files if updates are in progress."
+    }
+
     $confirm = [System.Windows.MessageBox]::Show(
-        "Proceed with cleaning $(Format-Bytes -Bytes $totalBytes) across $($targetsToClean.Count) selected C: drive junk categories?`n`nDiskman will safely remove unnecessary cache files and purge trash.`n`nReal-time deletion progress will stream live to the terminal window and activity log.",
+        "Proceed with cleaning $(Format-Bytes -Bytes $totalBytes) across $($targetsToClean.Count) selected C: drive junk categories?$advWarning`n`nDiskman will safely remove selected cache files and purge trash.`n`nReal-time deletion progress will stream live to the terminal window and activity log.",
         "Confirm C: Drive Cleanup",
         [System.Windows.MessageBoxButton]::YesNo,
         [System.Windows.MessageBoxImage]::Warning
@@ -362,8 +368,13 @@ $btnCleanSingleCategory.add_Click({
         return
     }
 
+    $advNotice = ""
+    if ($sel.SafetyLevel -eq 'Advanced' -or $sel.Id -in @('WinUpdateCache', 'DeliveryOpt')) {
+        $advNotice = "`n`n[ADVANCED CLEANUP NOTICE]`nThis removes downloaded Windows Update cache files. Windows may need to download them again. Do not use this while Windows is installing updates or waiting for a restart."
+    }
+
     $confirm = [System.Windows.MessageBox]::Show(
-        "Clean all files in '$($sel.CategoryName)' ($($sel.DisplaySize))?`n`nLocation: $($sel.Target)",
+        "Clean all files in '$($sel.CategoryName)' ($($sel.DisplaySize))?$advNotice`n`nLocation: $($sel.Target)",
         "Confirm Category Cleanup",
         [System.Windows.MessageBoxButton]::YesNo,
         [System.Windows.MessageBoxImage]::Question
@@ -610,9 +621,9 @@ Log-Console "=========================================================="
 Log-Console "DISKMAN - C: DRIVE STORAGE CLEANER & JUNK PURGER"
 Log-Console "Real-time activity and deletion logs will stream live below."
 if ($isAdmin) {
-    Log-Console "Elevated Administrator Mode active [Full Access]" "SUCCESS"
+    Log-Console "Elevated Administrator Mode active [Full Access - Protected Servicing Boundaries Enforced]" "SUCCESS"
 } else {
-    Log-Console "Standard Mode: Run as Administrator to purge Windows Update & System Cache" "WARN"
+    Log-Console "Standard Mode: Run as Administrator to clean system items" "WARN"
 }
 Log-Console "=========================================================="
 

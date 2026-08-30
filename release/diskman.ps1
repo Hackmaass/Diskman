@@ -29,109 +29,411 @@ function Format-Bytes {
     }
 }
 
-function Test-PathSafety {
+function Test-IsSubpathOrEqual {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$Candidate,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$Parent
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Candidate) -or [string]::IsNullOrWhiteSpace($Parent)) {
+        return $false
+    }
+
+    try {
+        $candNorm = [System.IO.Path]::GetFullPath($Candidate).TrimEnd('\', '/')
+        $parNorm  = [System.IO.Path]::GetFullPath($Parent).TrimEnd('\', '/')
+
+        if ($candNorm -ieq $parNorm) {
+            return $true
+        }
+
+        $parPrefix = $parNorm + [System.IO.Path]::DirectorySeparatorChar
+        return $candNorm.StartsWith($parPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
+function Test-ReparsePoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [AllowNull()]
         [string]$Path
     )
 
     if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+
+    try {
+        if (Test-Path -LiteralPath $Path) {
+            $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+            if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                return $true
+            }
+        }
+        return $false
+    } catch {
+        return $false
+    }
+}
+
+function Test-WindowsServicingActive {
+    [CmdletBinding()]
+    param()
+
+    try {
+        # 1. Inspect Windows Servicing & Update Services
+        $servicingServices = @(
+            @{ Name = 'wuauserv'; Display = 'Windows Update Service' },
+            @{ Name = 'TrustedInstaller'; Display = 'Windows Modules Installer (TrustedInstaller)' },
+            @{ Name = 'UsoSvc'; Display = 'Update Session Orchestrator Service' },
+            @{ Name = 'WaaSMedicSvc'; Display = 'Windows Update Medic Service' }
+        )
+
+        foreach ($svcInfo in $servicingServices) {
+            try {
+                $svc = Get-Service -Name $svcInfo.Name -ErrorAction SilentlyContinue
+                if ($svc) {
+                    if ($svc.Status -in @('Running', 'StartPending', 'StopPending', 'ContinuePending', 'PausePending')) {
+                        return @{
+                            IsActive  = $true
+                            Reason    = "$($svcInfo.Display) ($($svcInfo.Name)) is currently $($svc.Status)."
+                            Component = $svcInfo.Name
+                        }
+                    }
+                }
+            } catch {}
+        }
+
+        # 2. Check BITS (Background Intelligent Transfer Service) active jobs
+        try {
+            $bits = Get-Service -Name "bits" -ErrorAction SilentlyContinue
+            if ($bits -and $bits.Status -eq 'Running') {
+                $bitsJobs = Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue
+                if ($bitsJobs -and ($bitsJobs | Where-Object { $_.JobState -in @('Transferring', 'Connecting', 'Queued', 'Transferred') })) {
+                    return @{
+                        IsActive  = $true
+                        Reason    = "BITS service is active with update transfer jobs in queue."
+                        Component = "bits"
+                    }
+                }
+            }
+        } catch {}
+
+        # 3. Check Component Based Servicing (CBS) Registry Reboot / Staging Keys
+        $cbsRebootPending = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+        if (Test-Path -LiteralPath $cbsRebootPending) {
+            return @{
+                IsActive  = $true
+                Reason    = "Windows CBS reports a reboot is pending to apply staged updates."
+                Component = "CBS\RebootPending"
+            }
+        }
+
+        $cbsRebootInProgress = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootInProgress"
+        if (Test-Path -LiteralPath $cbsRebootInProgress) {
+            return @{
+                IsActive  = $true
+                Reason    = "Windows CBS reports update servicing is in progress."
+                Component = "CBS\RebootInProgress"
+            }
+        }
+
+        $cbsPackagesPending = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\PackagesPending"
+        if (Test-Path -LiteralPath $cbsPackagesPending) {
+            return @{
+                IsActive  = $true
+                Reason    = "Windows CBS reports packages are pending servicing."
+                Component = "CBS\PackagesPending"
+            }
+        }
+
+        # 4. Check Windows Update AutoUpdate Reboot Required Keys
+        $wuRebootRequired = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
+        if (Test-Path -LiteralPath $wuRebootRequired) {
+            return @{
+                IsActive  = $true
+                Reason    = "Windows Update reports a reboot is required to finalize installed updates."
+                Component = "WindowsUpdate\RebootRequired"
+            }
+        }
+
+        $wuPostReboot = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\PostRebootReporting"
+        if (Test-Path -LiteralPath $wuPostReboot) {
+            return @{
+                IsActive  = $true
+                Reason    = "Windows Update is awaiting post-reboot servicing reporting."
+                Component = "WindowsUpdate\PostRebootReporting"
+            }
+        }
+
+        # 5. Check Session Manager PendingFileRenameOperations
+        try {
+            $smKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
+            $pendingRenames = (Get-ItemProperty -Path $smKey -Name "PendingFileRenameOperations" -ErrorAction SilentlyContinue).PendingFileRenameOperations
+            if ($pendingRenames -and $pendingRenames.Count -gt 0) {
+                return @{
+                    IsActive  = $true
+                    Reason    = "System has PendingFileRenameOperations queued for next reboot."
+                    Component = "SessionManager\PendingFileRenameOperations"
+                }
+            }
+        } catch {}
+
+        # 6. Check UpdateExeVolatile
+        try {
+            $updateVolatileKey = "HKLM:\SOFTWARE\Microsoft\Updates"
+            $volatileVal = (Get-ItemProperty -Path $updateVolatileKey -Name "UpdateExeVolatile" -ErrorAction SilentlyContinue).UpdateExeVolatile
+            if ($null -ne $volatileVal -and [int]$volatileVal -ne 0) {
+                return @{
+                    IsActive  = $true
+                    Reason    = "UpdateExeVolatile flag is active ($volatileVal)."
+                    Component = "Updates\UpdateExeVolatile"
+                }
+            }
+        } catch {}
+
+        return @{
+            IsActive  = $false
+            Reason    = "Servicing state is idle."
+            Component = $null
+        }
+    } catch {
+        # Fail closed: if we cannot inspect servicing state, assume active to avoid corruption
+        return @{
+            IsActive  = $true
+            Reason    = "Unable to verify servicing state ($($_.Exception.Message)) - failing closed."
+            Component = "Unknown"
+        }
+    }
+}
+
+function Test-PathSafety {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$Path
+    )
+
+    # Fail Closed: Check null, empty or whitespace
+    if ([string]::IsNullOrWhiteSpace($Path)) {
         return @{ Safe = $false; Reason = "Path is empty or null." }
     }
 
-    $normalized = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
-
-    # 1. Block Drive Roots (e.g., C:, C:\, D:\)
-    if ($normalized -match '^[A-Za-z]:$') {
-        return @{ Safe = $false; Reason = "Drive roots cannot be deleted." }
+    try {
+        # Normalize and resolve full absolute path
+        $normalized = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    } catch {
+        return @{ Safe = $false; Reason = "Invalid or unresolvable path ($($_.Exception.Message))." }
     }
 
-    # 2. Block Critical Windows Operating System Roots
-    $blockedExactRoots = @(
-        "C:\Windows",
-        "C:\Windows\System32",
-        "C:\Windows\SysWOW64",
-        "C:\Windows\WinSxS",
-        "C:\Windows\SystemApps",
-        "C:\Windows\Boot",
-        "C:\Windows\inf",
-        "C:\Windows\Fonts",
-        "C:\Windows\assembly",
-        "C:\Windows\Microsoft.NET",
-        "C:\Program Files",
-        "C:\Program Files (x86)",
-        "C:\ProgramData",
-        "C:\Users",
-        "C:\Recovery",
-        "C:\System Volume Information"
-    )
+    try {
+        # Dynamic OS environment resolution
+        $sysRoot      = if ($env:SystemRoot) { $env:SystemRoot.TrimEnd('\', '/') } else { "C:\Windows" }
+        $sysDrive     = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\', '/') } else { "C:" }
+        $progFiles    = if ($env:ProgramFiles) { $env:ProgramFiles.TrimEnd('\', '/') } else { "C:\Program Files" }
+        $progFilesX86 = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)}.TrimEnd('\', '/') } else { "C:\Program Files (x86)" }
+        $progData     = if ($env:ProgramData) { $env:ProgramData.TrimEnd('\', '/') } else { "C:\ProgramData" }
+        $userProfile  = if ($env:USERPROFILE) { $env:USERPROFILE.TrimEnd('\', '/') } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile).TrimEnd('\', '/') }
+        $usersRoot    = [System.IO.Path]::GetDirectoryName($userProfile)
+        if ([string]::IsNullOrWhiteSpace($usersRoot)) { $usersRoot = "$sysDrive\Users" }
 
-    foreach ($blocked in $blockedExactRoots) {
-        if ($normalized -ieq $blocked.TrimEnd('\')) {
-            return @{ Safe = $false; Reason = "Path is a protected system root ($blocked)." }
+        # -------------------------------------------------------------
+        # 1. Block Drive Roots (e.g. C:, C:\, D:, D:\)
+        # -------------------------------------------------------------
+        if ($normalized -match '^[A-Za-z]:$' -or $normalized.Length -le 3) {
+            return @{ Safe = $false; Reason = "Drive roots cannot be targeted for cleanup." }
         }
-    }
 
-    # 3. Block User Personal Data Folders (Desktop, Documents, Pictures, Videos, Music)
-    $userProfile = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile).TrimEnd('\')
-    $blockedUserFolders = @(
-        $userProfile,
-        (Join-Path $userProfile "Desktop"),
-        (Join-Path $userProfile "Documents"),
-        (Join-Path $userProfile "Pictures"),
-        (Join-Path $userProfile "Videos"),
-        (Join-Path $userProfile "Music"),
-        (Join-Path $userProfile "Contacts"),
-        (Join-Path $userProfile "Favorites"),
-        (Join-Path $userProfile "Saved Games"),
-        (Join-Path $userProfile "OneDrive")
-    )
+        # -------------------------------------------------------------
+        # 2. Block Critical System Boot, Virtual Memory & Kernel Files
+        # -------------------------------------------------------------
+        $fileName = [System.IO.Path]::GetFileName($normalized)
+        $blockedSystemFiles = @(
+            "pagefile.sys",
+            "swapfile.sys",
+            "hiberfil.sys",
+            "bootmgr",
+            "bootstat.dat",
+            "BCD",
+            "NTUSER.DAT",
+            "UsrClass.dat"
+        )
 
-    foreach ($uFolder in $blockedUserFolders) {
-        if ($normalized -ieq $uFolder) {
-            return @{ Safe = $false; Reason = "Path is a protected user personal data directory ($uFolder)." }
+        foreach ($sysFile in $blockedSystemFiles) {
+            if ($fileName -ieq $sysFile -or $fileName -ilike "$sysFile.*") {
+                return @{ Safe = $false; Reason = "Protected Windows system boot/kernel file ($fileName)." }
+            }
         }
+
+        # Block servicing state files and database files
+        if ($fileName -ilike "*.mum" -or $fileName -ilike "*.manifest" -or $fileName -ieq "pending.xml" -or $fileName -ieq "reboot.xml" -or $fileName -ieq "DataStore.edb") {
+            return @{ Safe = $false; Reason = "Protected Windows servicing state/manifest file ($fileName)." }
+        }
+
+        # -------------------------------------------------------------
+        # 3. Block Browser Sensitive Files (Passwords, Cookies, Sessions)
+        # -------------------------------------------------------------
+        $blockedBrowserFiles = @(
+            "Login Data",
+            "Login Data-journal",
+            "Cookies",
+            "Cookies-journal",
+            "History",
+            "History-journal",
+            "Bookmarks",
+            "Bookmarks.bak",
+            "Preferences",
+            "Secure Preferences",
+            "Web Data",
+            "Local State"
+        )
+
+        if ($fileName -in $blockedBrowserFiles) {
+            return @{ Safe = $false; Reason = "Protected user browser profile/credential data ($fileName)." }
+        }
+
+        # -------------------------------------------------------------
+        # 4. Block Hard System-Servicing & Protected Hierarchies
+        # -------------------------------------------------------------
+        $strictlyProtectedTrees = @(
+            (Join-Path $sysRoot "WinSxS"),
+            (Join-Path $sysRoot "servicing"),
+            (Join-Path $sysRoot "System32\catroot"),
+            (Join-Path $sysRoot "System32\catroot2"),
+            (Join-Path $sysRoot "System32\wbem\Repository"),
+            (Join-Path $sysRoot "System32\config"),
+            (Join-Path $sysRoot "System32\drivers"),
+            (Join-Path $sysRoot "System32\DriverStore"),
+            (Join-Path $sysRoot "System32\Boot"),
+            (Join-Path $sysRoot "Boot"),
+            (Join-Path $sysDrive "Boot"),
+            (Join-Path $sysDrive "EFI"),
+            (Join-Path $sysRoot "SystemApps"),
+            (Join-Path $sysRoot "assembly"),
+            (Join-Path $sysRoot "Microsoft.NET"),
+            (Join-Path $sysRoot "inf"),
+            (Join-Path $sysRoot "Fonts"),
+            (Join-Path $sysDrive "Recovery"),
+            (Join-Path $sysDrive "System Volume Information"),
+            (Join-Path $sysDrive "`$WINDOWS.~BT"),
+            (Join-Path $sysDrive "`$WINDOWS.~WS"),
+            (Join-Path $sysDrive "`$SysReset")
+        )
+
+        foreach ($tree in $strictlyProtectedTrees) {
+            if (Test-IsSubpathOrEqual -Candidate $normalized -Parent $tree) {
+                return @{ Safe = $false; Reason = "Windows servicing / protected OS component path ($tree)." }
+            }
+        }
+
+        # -------------------------------------------------------------
+        # 5. Block System32 and SysWOW64 Hierarchies
+        # -------------------------------------------------------------
+        $sys32 = Join-Path $sysRoot "System32"
+        $sysWow64 = Join-Path $sysRoot "SysWOW64"
+
+        if (Test-IsSubpathOrEqual -Candidate $normalized -Parent $sys32) {
+            return @{ Safe = $false; Reason = "Windows System32 directory and contents are protected." }
+        }
+
+        if (Test-IsSubpathOrEqual -Candidate $normalized -Parent $sysWow64) {
+            return @{ Safe = $false; Reason = "Windows SysWOW64 directory and contents are protected." }
+        }
+
+        # -------------------------------------------------------------
+        # 6. Windows Root and SoftwareDistribution Protection
+        # -------------------------------------------------------------
+        if ($normalized -ieq $sysRoot) {
+            return @{ Safe = $false; Reason = "Windows system root directory cannot be targeted." }
+        }
+
+        # If path is inside Windows directory, only permit explicitly designated safe sub-areas
+        if (Test-IsSubpathOrEqual -Candidate $normalized -Parent $sysRoot) {
+            $allowedWindowsSubpaths = @(
+                (Join-Path $sysRoot "Temp"),
+                (Join-Path $sysRoot "Logs\CBS"),
+                (Join-Path $sysRoot "Logs\DISM"),
+                (Join-Path $sysRoot "SoftwareDistribution\Download"),
+                (Join-Path $sysRoot "SoftwareDistribution\DeliveryOptimization")
+            )
+
+            $isPermittedSubpath = $false
+            foreach ($allowed in $allowedWindowsSubpaths) {
+                if (Test-IsSubpathOrEqual -Candidate $normalized -Parent $allowed) {
+                    $isPermittedSubpath = $true
+                    break
+                }
+            }
+
+            if (-not $isPermittedSubpath) {
+                # Specifically explain if it's SoftwareDistribution non-download or generic Windows directory
+                $swDistRoot = Join-Path $sysRoot "SoftwareDistribution"
+                if (Test-IsSubpathOrEqual -Candidate $normalized -Parent $swDistRoot) {
+                    return @{ Safe = $false; Reason = "SoftwareDistribution parent database/metadata path is protected ($normalized)." }
+                }
+                return @{ Safe = $false; Reason = "Path is within protected Windows root and is not an approved safe subfolder ($normalized)." }
+            }
+        }
+
+        # -------------------------------------------------------------
+        # 7. Block Program Files, ProgramData, and Users Root Directories
+        # -------------------------------------------------------------
+        $protectedExactRoots = @(
+            $progFiles,
+            $progFilesX86,
+            $progData,
+            $usersRoot,
+            $userProfile
+        )
+
+        foreach ($exactRoot in $protectedExactRoots) {
+            if ($normalized -ieq $exactRoot) {
+                return @{ Safe = $false; Reason = "Root directory is protected from bulk cleanup ($exactRoot)." }
+            }
+        }
+
+        # -------------------------------------------------------------
+        # 8. Block User Personal Data Folders
+        # -------------------------------------------------------------
+        $blockedUserFolders = @(
+            (Join-Path $userProfile "Desktop"),
+            (Join-Path $userProfile "Documents"),
+            (Join-Path $userProfile "Downloads"),
+            (Join-Path $userProfile "Pictures"),
+            (Join-Path $userProfile "Videos"),
+            (Join-Path $userProfile "Music"),
+            (Join-Path $userProfile "Contacts"),
+            (Join-Path $userProfile "Favorites"),
+            (Join-Path $userProfile "Saved Games"),
+            (Join-Path $userProfile "OneDrive")
+        )
+
+        foreach ($uFolder in $blockedUserFolders) {
+            if (Test-IsSubpathOrEqual -Candidate $normalized -Parent $uFolder) {
+                return @{ Safe = $false; Reason = "Path is a protected user personal data directory ($uFolder)." }
+            }
+        }
+
+        # Passed all multi-layer safety barriers
+        return @{ Safe = $true; Reason = "OK" }
+    } catch {
+        # Fail Closed on any unexpected error
+        return @{ Safe = $false; Reason = "Safety evaluation exception: $($_.Exception.Message)" }
     }
-
-    # 4. Block Critical System Boot & Virtual Memory Files
-    $fileName = [System.IO.Path]::GetFileName($normalized)
-    $blockedSystemFiles = @(
-        "pagefile.sys",
-        "swapfile.sys",
-        "hiberfil.sys",
-        "bootmgr",
-        "bootstat.dat",
-        "BCD",
-        "NTUSER.DAT",
-        "UsrClass.dat"
-    )
-
-    if ($fileName -in $blockedSystemFiles) {
-        return @{ Safe = $false; Reason = "Protected Windows system kernel/boot file ($fileName)." }
-    }
-
-    # 5. Block Browser Sensitive Files (Passwords, Cookies, History, Bookmarks)
-    $blockedBrowserFiles = @(
-        "Login Data",
-        "Login Data-journal",
-        "Cookies",
-        "Cookies-journal",
-        "History",
-        "History-journal",
-        "Bookmarks",
-        "Bookmarks.bak",
-        "Preferences",
-        "Secure Preferences",
-        "Web Data",
-        "Local State"
-    )
-
-    if ($fileName -in $blockedBrowserFiles) {
-        return @{ Safe = $false; Reason = "Protected user browser profile data ($fileName)." }
-    }
-
-    return @{ Safe = $true; Reason = "OK" }
 }
 
 
@@ -398,7 +700,7 @@ function Send-ItemToRecycleBin {
         }
         return @{ Success = $true; Message = "Item moved to Recycle Bin safely." }
     } catch {
-        return @{ Success = $false; Message = "Failed to recycle: $_" }
+        return @{ Success = $false; Message = "Failed to recycle: $($_.Exception.Message)" }
     }
 }
 
@@ -421,19 +723,19 @@ function Remove-ItemPermanently {
 
     try {
         if (Test-Path -LiteralPath $Path -PathType Container) {
-            [System.IO.Directory]::Delete($Path, $true)
+            $isReparse = Test-ReparsePoint -Path $Path
+            if ($isReparse) {
+                [System.IO.Directory]::Delete($Path, $false)
+            } else {
+                [System.IO.Directory]::Delete($Path, $true)
+            }
         } else {
             [System.IO.File]::SetAttributes($Path, [System.IO.FileAttributes]::Normal)
             [System.IO.File]::Delete($Path)
         }
         return @{ Success = $true; Message = "Item permanently deleted." }
     } catch {
-        try {
-            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
-            return @{ Success = $true; Message = "Item permanently deleted." }
-        } catch {
-            return @{ Success = $false; Message = "Delete failed: $_" }
-        }
+        return @{ Success = $false; Message = "Delete failed: $($_.Exception.Message)" }
     }
 }
 
@@ -467,6 +769,10 @@ function Get-FolderSizeFast {
                     } catch {}
                 }
                 foreach ($sub in $dirInfo.EnumerateDirectories()) {
+                    # Skip symlinks and junctions to avoid infinite loops and external traversal
+                    if ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                        continue
+                    }
                     $queue.Enqueue($sub.FullName)
                 }
             } catch {}
@@ -481,7 +787,10 @@ function Get-CleanableTargets {
     [CmdletBinding()]
     param()
 
-    $userTempPath = [System.IO.Path]::GetTempPath().TrimEnd('\')
+    $sysRoot      = if ($env:SystemRoot) { $env:SystemRoot.TrimEnd('\', '/') } else { "C:\Windows" }
+    $sysDrive     = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\', '/') } else { "C:" }
+    $progData     = if ($env:ProgramData) { $env:ProgramData.TrimEnd('\', '/') } else { "C:\ProgramData" }
+    $userTempPath = [System.IO.Path]::GetTempPath().TrimEnd('\', '/')
     $localAppData = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData)
     $appData      = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ApplicationData)
     $userProfile  = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
@@ -498,7 +807,7 @@ function Get-CleanableTargets {
             Path        = $userTempPath
             Description = 'Temporary application and cache files created by running user programs'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -507,10 +816,10 @@ function Get-CleanableTargets {
             Group       = 'Windows & System'
             Category    = 'Windows System Temp'
             Icon        = '[SYS]'
-            Path        = 'C:\Windows\Temp'
-            Description = 'Operating system temporary cache files (C:\Windows\Temp)'
+            Path        = (Join-Path $sysRoot 'Temp')
+            Description = 'Operating system temporary cache files'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $true
         },
@@ -519,11 +828,11 @@ function Get-CleanableTargets {
             Group       = 'Windows & System'
             Category    = 'Windows Update Cache'
             Icon        = '[UPDATE]'
-            Path        = 'C:\Windows\SoftwareDistribution\Download'
-            Description = 'Already-downloaded and applied Windows Update installation payloads'
+            Path        = (Join-Path $sysRoot 'SoftwareDistribution\Download')
+            Description = 'Advanced cleanup â€” Downloaded Windows Update packages. Windows may need to re-download update files if updates are in progress.'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
-            Recommended = $true
+            SafetyLevel = 'Advanced'
+            Recommended = $false
             RequiresAdmin = $true
         },
         @{
@@ -531,11 +840,11 @@ function Get-CleanableTargets {
             Group       = 'Windows & System'
             Category    = 'Delivery Optimization Files'
             Icon        = '[OPT]'
-            Path        = 'C:\Windows\SoftwareDistribution\DeliveryOptimization'
-            Description = 'Cached Windows peer-to-peer delivery optimization chunks'
+            Path        = (Join-Path $sysRoot 'SoftwareDistribution\DeliveryOptimization')
+            Description = 'Advanced cleanup â€” Cached Windows peer-to-peer delivery optimization chunks.'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
-            Recommended = $true
+            SafetyLevel = 'Advanced'
+            Recommended = $false
             RequiresAdmin = $true
         },
         @{
@@ -546,7 +855,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'CrashDumps')
             Description = 'Application crash dumps (.dmp files) from previously crashed applications'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -558,7 +867,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'Microsoft\Windows\WER')
             Description = 'Queued and archived Windows error reporting telemetry data'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -567,10 +876,10 @@ function Get-CleanableTargets {
             Group       = 'Windows & System'
             Category    = 'Windows CBS & Component Logs'
             Icon        = '[LOG]'
-            Path        = 'C:\Windows\Logs\CBS'
-            Description = 'Old Windows Component-Based Servicing installation log files'
+            Path        = (Join-Path $sysRoot 'Logs\CBS')
+            Description = 'Historical Windows Component-Based Servicing installation log files'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $true
         },
@@ -579,16 +888,16 @@ function Get-CleanableTargets {
             Group       = 'Windows & System'
             Category    = 'DISM & Servicing Logs'
             Icon        = '[LOG]'
-            Path        = 'C:\Windows\Logs\DISM'
+            Path        = (Join-Path $sysRoot 'Logs\DISM')
             Description = 'Deployment Image Servicing and Management log files'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $true
         },
 
         # ==========================================
-        # 2. GAMING & GPU SHADER CACHES (HEAVY SPACE SAVERS)
+        # 2. GAMING & GPU SHADER CACHES
         # ==========================================
         @{
             Id          = 'NvidiaDxCache'
@@ -598,7 +907,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'NVIDIA\DXCache')
             Description = 'Compiled DirectX game shader cache. Rebuilt dynamically by NVIDIA GPU driver.'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -610,7 +919,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'NVIDIA\GLCache')
             Description = 'Compiled OpenGL and Vulkan game shader cache from NVIDIA GPU'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -622,7 +931,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'D3DSCache')
             Description = 'Global Windows DirectX shader cache shared across game titles'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -634,7 +943,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'AMD\DxCache')
             Description = 'Compiled game shader cache for AMD Radeon graphics cards'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -646,7 +955,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'Intel\ShaderCache')
             Description = 'Compiled game shader cache for Intel Arc and Iris graphics'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -658,7 +967,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'Steam\htmlcache')
             Description = 'Cached store web assets, media thumbnails, and browser cache in Steam'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -670,7 +979,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'EpicGamesLauncher\Saved\webcache')
             Description = 'Cached store assets and web interface data in Epic Games Launcher'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -682,7 +991,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'Electronic Arts\EA Desktop\Cache')
             Description = 'Cached game store artwork and web data in EA Desktop'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -694,7 +1003,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'Ubisoft Game Launcher\cache')
             Description = 'Cached client assets and avatars in Ubisoft Connect Launcher'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -703,10 +1012,10 @@ function Get-CleanableTargets {
             Group       = 'Gaming & GPU'
             Category    = 'Battle.net / Blizzard Agent Cache'
             Icon        = '[BNET]'
-            Path        = 'C:\ProgramData\Battle.net\Agent\data\cache'
+            Path        = (Join-Path $progData 'Battle.net\Agent\data\cache')
             Description = 'Battle.net Agent patcher and installer cached metadata'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $true
         },
@@ -718,7 +1027,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'Riot Games\Riot Client\Logs')
             Description = 'Historical log dumps from Riot Client (League of Legends, Valorant)'
             Type        = 'DirectoryContents'
-            SafetyLevel = '100% Safe'
+            SafetyLevel = 'Safe'
             Recommended = $true
             RequiresAdmin = $false
         },
@@ -731,7 +1040,7 @@ function Get-CleanableTargets {
             Description = 'Derived data cache for Unreal Engine 4 and 5 game compilations'
             Type        = 'DirectoryContents'
             SafetyLevel = 'Safe'
-            Recommended = $true
+            Recommended = $false
             RequiresAdmin = $false
         },
         @{
@@ -743,7 +1052,7 @@ function Get-CleanableTargets {
             Description = 'Downloaded package and asset store caches for Unity games'
             Type        = 'DirectoryContents'
             SafetyLevel = 'Safe'
-            Recommended = $true
+            Recommended = $false
             RequiresAdmin = $false
         },
 
@@ -806,7 +1115,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $userProfile '.gradle\caches')
             Description = 'Downloaded jar artifacts and distribution zip caches in Gradle'
             Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
+            SafetyLevel = 'Optional'
             Recommended = $false
             RequiresAdmin = $false
         },
@@ -818,7 +1127,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $userProfile '.cargo\registry\cache')
             Description = 'Cached Rust crate archive files'
             Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
+            SafetyLevel = 'Optional'
             Recommended = $false
             RequiresAdmin = $false
         },
@@ -882,7 +1191,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $localAppData 'Spotify\Storage')
             Description = 'Locally cached music streams and playback buffers in Spotify'
             Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
+            SafetyLevel = 'Optional'
             Recommended = $false
             RequiresAdmin = $false
         },
@@ -918,7 +1227,7 @@ function Get-CleanableTargets {
             Path        = (Join-Path $appData 'Telegram Desktop\tdata\user_data\media_cache')
             Description = 'Locally cached stickers, images, and voice notes in Telegram'
             Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
+            SafetyLevel = 'Optional'
             Recommended = $false
             RequiresAdmin = $false
         },
@@ -931,7 +1240,7 @@ function Get-CleanableTargets {
             Group       = 'Recycle Bin'
             Category    = 'Windows Recycle Bin (C:)'
             Icon        = '[TRASH]'
-            Path        = 'C:\$Recycle.Bin'
+            Path        = (Join-Path $sysDrive '`$Recycle.Bin')
             Description = 'Deleted files and folders residing in the Windows Recycle Bin'
             Type        = 'RecycleBin'
             SafetyLevel = 'Safe'
@@ -949,6 +1258,7 @@ function Scan-SmartCleanupItems {
 
     $targets = Get-CleanableTargets
     $results = @()
+    $sysDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\', '/') } else { "C:" }
 
     foreach ($t in $targets) {
         $rawBytes = [long]0
@@ -956,7 +1266,8 @@ function Scan-SmartCleanupItems {
         $pathExists = $false
 
         if ($t.Type -eq 'RecycleBin') {
-            $stats = Get-FolderSizeFast -Path 'C:\$Recycle.Bin'
+            $recyclePath = "$sysDrive\`$Recycle.Bin"
+            $stats = Get-FolderSizeFast -Path $recyclePath
             $rawBytes = $stats.RawBytes
             $fileCount = $stats.FileCount
             $pathExists = $stats.Exists
@@ -1059,7 +1370,7 @@ function Invoke-ExecuteCleanup {
 
         # Check if item requires Administrator rights
         if ($item.RequiresAdmin -and -not $isAdmin) {
-            $msg = "Skipped $($item.CategoryName): Task cannot be completed due to lack of Administrator privileges. Please launch Diskman as Administrator (run.bat) to clean this item."
+            $msg = "Skipped $($item.CategoryName): Task cannot be completed due to lack of Administrator privileges. Launch Diskman as Administrator (run.bat) to clean this item."
             $logMessages += $msg
             if ($null -ne $OnProgress) {
                 & $OnProgress "Starting purge of $($item.CategoryName) ($($item.DisplaySize))..." "INFO"
@@ -1072,35 +1383,18 @@ function Invoke-ExecuteCleanup {
             & $OnProgress "Starting purge of $($item.CategoryName) ($($item.DisplaySize))..." "INFO"
         }
 
-        # Handle Windows Services file locks (only when running elevated)
-        $restartedServices = @()
-        if ($isAdmin) {
-            if ($item.Id -eq 'WinUpdateCache') {
+        # -------------------------------------------------------------
+        # State-Aware Windows Update & Servicing Safety Check
+        # -------------------------------------------------------------
+        if ($item.Id -in @('WinUpdateCache', 'DeliveryOpt')) {
+            $servicingState = Test-WindowsServicingActive
+            if ($servicingState.IsActive) {
+                $skipMsg = "SKIPPED $($item.CategoryName): Windows servicing or update operation is currently active ($($servicingState.Reason)). Cleanup aborted to safeguard OS integrity."
+                $logMessages += $skipMsg
                 if ($null -ne $OnProgress) {
-                    & $OnProgress "  -> Temporarily releasing Windows Update service lock (wuauserv)..." "INFO"
+                    & $OnProgress "  [!] $skipMsg" "WARN"
                 }
-                try {
-                    $wuauserv = Get-Service -Name "wuauserv" -ErrorAction SilentlyContinue
-                    if ($wuauserv -and $wuauserv.Status -eq 'Running') {
-                        Stop-Service -Name "wuauserv" -Force -ErrorAction SilentlyContinue
-                        $restartedServices += "wuauserv"
-                    }
-                } catch {}
-                try {
-                    $bits = Get-Service -Name "bits" -ErrorAction SilentlyContinue
-                    if ($bits -and $bits.Status -eq 'Running') {
-                        Stop-Service -Name "bits" -Force -ErrorAction SilentlyContinue
-                        $restartedServices += "bits"
-                    }
-                } catch {}
-            } elseif ($item.Id -eq 'DeliveryOpt') {
-                try {
-                    $doSvc = Get-Service -Name "DoSvc" -ErrorAction SilentlyContinue
-                    if ($doSvc -and $doSvc.Status -eq 'Running') {
-                        Stop-Service -Name "DoSvc" -Force -ErrorAction SilentlyContinue
-                        $restartedServices += "DoSvc"
-                    }
-                } catch {}
+                continue
             }
         }
 
@@ -1129,13 +1423,14 @@ function Invoke-ExecuteCleanup {
 
         $targetPath = $item.Target
         if (Test-Path -LiteralPath $targetPath) {
-            # Double-check safety guard on the target root
+            # Strict Safety Gate: Test-PathSafety is the final and absolute authority.
+            # No hardcoded exceptions or bypasses allowed.
             $targetSafety = Test-PathSafety -Path $targetPath
-            if (-not $targetSafety.Safe -and $targetPath -notlike "C:\Windows\SoftwareDistribution\*" -and $targetPath -notlike "C:\Windows\Temp*" -and $targetPath -notlike "C:\Windows\Logs\*") {
+            if (-not $targetSafety.Safe) {
                 $msg = "BLOCKED: Target directory failed safety check: $($targetSafety.Reason)"
                 $logMessages += $msg
                 if ($null -ne $OnProgress) {
-                    & $OnProgress $msg "ERROR"
+                    & $OnProgress "  [X] $msg" "ERROR"
                 }
                 continue
             }
@@ -1150,7 +1445,7 @@ function Invoke-ExecuteCleanup {
                 $totalInCat = ($itemsToClean | Measure-Object).Count
 
                 foreach ($entry in $itemsToClean) {
-                    # Rigorous safety validation on every single item
+                    # Rigorous safety validation on every single child item
                     $itemSafety = Test-PathSafety -Path $entry.FullName
                     if (-not $itemSafety.Safe) {
                         $catSkippedCount++
@@ -1166,28 +1461,41 @@ function Invoke-ExecuteCleanup {
                     try {
                         if ($entry.PSIsContainer) {
                             $entryBytes = (Get-FolderSizeFast -Path $entry.FullName).RawBytes
-                            
-                            try {
-                                $attr = [System.IO.File]::GetAttributes($entry.FullName)
-                                if ($attr -band [System.IO.FileAttributes]::ReadOnly) {
-                                    [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
-                                }
-                            } catch {}
 
-                            try {
-                                [System.IO.Directory]::Delete($entry.FullName, $true)
-                                $entryDeleted = $true
-                            } catch [System.UnauthorizedAccessException] {
-                                $entryDeleted = $false
-                            } catch {
+                            # Detect Reparse Points / Junctions / Symbolic Links
+                            if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                                # Delete only the link itself without recursive traversal
                                 try {
-                                    Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+                                    [System.IO.Directory]::Delete($entry.FullName, $false)
                                     $entryDeleted = $true
+                                } catch {
+                                    $entryDeleted = $false
+                                }
+                            } else {
+                                try {
+                                    $attr = [System.IO.File]::GetAttributes($entry.FullName)
+                                    if ($attr -band [System.IO.FileAttributes]::ReadOnly) {
+                                        [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
+                                    }
                                 } catch {}
+
+                                try {
+                                    [System.IO.Directory]::Delete($entry.FullName, $true)
+                                    $entryDeleted = $true
+                                } catch [System.UnauthorizedAccessException] {
+                                    $entryDeleted = $false
+                                } catch {
+                                    try {
+                                        Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+                                        $entryDeleted = $true
+                                    } catch {
+                                        $entryDeleted = $false
+                                    }
+                                }
                             }
                         } else {
                             $entryBytes = [long]$entry.Length
-                            
+
                             try {
                                 [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
                             } catch {}
@@ -1201,7 +1509,9 @@ function Invoke-ExecuteCleanup {
                                 try {
                                     Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
                                     $entryDeleted = $true
-                                } catch {}
+                                } catch {
+                                    $entryDeleted = $false
+                                }
                             }
                         }
 
@@ -1222,16 +1532,6 @@ function Invoke-ExecuteCleanup {
                     }
 
                     try { [System.Windows.Forms.Application]::DoEvents() } catch {}
-                }
-
-                # Restore services if paused
-                foreach ($svc in $restartedServices) {
-                    try {
-                        Start-Service -Name $svc -ErrorAction SilentlyContinue
-                        if ($null -ne $OnProgress) {
-                            & $OnProgress "  -> Restored service $svc" "INFO"
-                        }
-                    } catch {}
                 }
 
                 if ($catFreedBytes -le 0 -and $catDeletedCount -gt 0) {
@@ -2247,7 +2547,7 @@ function Start-ScanCJunk {
     
     $txtCReclaimable.Text = "~$(Format-Bytes -Bytes $totalReclaimable)"
     Update-SelectedCleanupBadge
-    Log-Console "Scan complete! Total reclaimable junk on C: drive: $(Format-Bytes -Bytes $totalReclaimable)" "SUCCESS"
+    Log-Console "Scan complete! Total reclaimable space on C: drive: $(Format-Bytes -Bytes $totalReclaimable)" "SUCCESS"
 }
 
 # Selection Presets
@@ -2256,12 +2556,12 @@ $btnSelectRec.add_Click({
         if ($item.RequiresAdmin -and -not $isAdmin) {
             $item.IsSelected = $false
         } else {
-            $item.IsSelected = ($item.Recommended -and $item.RawBytes -gt 0)
+            $item.IsSelected = ($item.Recommended -and $item.SafetyLevel -ne 'Advanced' -and $item.RawBytes -gt 0)
         }
     }
     $gridCleanCategories.Items.Refresh()
     Update-SelectedCleanupBadge
-    Log-Console "Applied recommended cleanup selection preset."
+    Log-Console "Applied recommended cleanup selection preset (Advanced targets excluded by default)."
 })
 
 $btnSelectAll.add_Click({
@@ -2299,7 +2599,7 @@ $gridCleanCategories.add_SelectionChanged({
     }
 })
 
-# 1. Action: Open in File Explorer (User Key Requirement)
+# 1. Action: Open in File Explorer
 $btnOpenCatInExplorer.add_Click({
     $sel = $gridCleanCategories.SelectedItem
     if (-not $sel) {
@@ -2355,8 +2655,14 @@ $btnRunCleanup.add_Click({
     }
 
     $totalBytes = ($targetsToClean | Measure-Object -Property RawBytes -Sum).Sum
+    $hasAdvanced = ($targetsToClean | Where-Object { $_.SafetyLevel -eq 'Advanced' -or $_.Id -in @('WinUpdateCache', 'DeliveryOpt') }).Count -gt 0
+    $advWarning = ""
+    if ($hasAdvanced) {
+        $advWarning = "`n`n[ADVANCED CLEANUP NOTICE]`nWindows Update Cache cleanup is selected. Diskman will verify that Windows Update and servicing components are idle before cleaning. Windows may need to re-download update files if updates are in progress."
+    }
+
     $confirm = [System.Windows.MessageBox]::Show(
-        "Proceed with cleaning $(Format-Bytes -Bytes $totalBytes) across $($targetsToClean.Count) selected C: drive junk categories?`n`nDiskman will safely remove unnecessary cache files and purge trash.`n`nReal-time deletion progress will stream live to the terminal window and activity log.",
+        "Proceed with cleaning $(Format-Bytes -Bytes $totalBytes) across $($targetsToClean.Count) selected C: drive junk categories?$advWarning`n`nDiskman will safely remove selected cache files and purge trash.`n`nReal-time deletion progress will stream live to the terminal window and activity log.",
         "Confirm C: Drive Cleanup",
         [System.Windows.MessageBoxButton]::YesNo,
         [System.Windows.MessageBoxImage]::Warning
@@ -2411,8 +2717,13 @@ $btnCleanSingleCategory.add_Click({
         return
     }
 
+    $advNotice = ""
+    if ($sel.SafetyLevel -eq 'Advanced' -or $sel.Id -in @('WinUpdateCache', 'DeliveryOpt')) {
+        $advNotice = "`n`n[ADVANCED CLEANUP NOTICE]`nThis removes downloaded Windows Update cache files. Windows may need to download them again. Do not use this while Windows is installing updates or waiting for a restart."
+    }
+
     $confirm = [System.Windows.MessageBox]::Show(
-        "Clean all files in '$($sel.CategoryName)' ($($sel.DisplaySize))?`n`nLocation: $($sel.Target)",
+        "Clean all files in '$($sel.CategoryName)' ($($sel.DisplaySize))?$advNotice`n`nLocation: $($sel.Target)",
         "Confirm Category Cleanup",
         [System.Windows.MessageBoxButton]::YesNo,
         [System.Windows.MessageBoxImage]::Question
@@ -2659,9 +2970,9 @@ Log-Console "=========================================================="
 Log-Console "DISKMAN - C: DRIVE STORAGE CLEANER & JUNK PURGER"
 Log-Console "Real-time activity and deletion logs will stream live below."
 if ($isAdmin) {
-    Log-Console "Elevated Administrator Mode active [Full Access]" "SUCCESS"
+    Log-Console "Elevated Administrator Mode active [Full Access - Protected Servicing Boundaries Enforced]" "SUCCESS"
 } else {
-    Log-Console "Standard Mode: Run as Administrator to purge Windows Update & System Cache" "WARN"
+    Log-Console "Standard Mode: Run as Administrator to clean system items" "WARN"
 }
 Log-Console "=========================================================="
 
