@@ -71,71 +71,117 @@ function Test-ReparsePoint {
         [string]$Path
     )
 
+    # Fail Closed: empty, null, or whitespace cannot be verified
     if ([string]::IsNullOrWhiteSpace($Path)) {
-        return $false
+        return @{
+            Success        = $false
+            IsReparsePoint = $true
+            Reason         = "Path is empty or null (failing closed as reparse point)."
+        }
     }
 
     try {
-        if (Test-Path -LiteralPath $Path) {
-            $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-            if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-                return $true
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return @{
+                Success        = $true
+                IsReparsePoint = $false
+                Reason         = "Path does not exist."
             }
         }
-        return $false
+
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($null -ne $item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            return @{
+                Success        = $true
+                IsReparsePoint = $true
+                Reason         = "Reparse point (junction / symlink) detected."
+            }
+        }
+
+        return @{
+            Success        = $true
+            IsReparsePoint = $false
+            Reason         = "Normal non-reparse file system item."
+        }
     } catch {
-        return $false
+        # Fail Closed: Any metadata access or inspection failure is treated as unsafe/reparse
+        return @{
+            Success        = $false
+            IsReparsePoint = $true
+            Reason         = "Reparse inspection failed ($($_.Exception.Message)) - failing closed."
+        }
     }
 }
 
 function Test-WindowsServicingActive {
     [CmdletBinding()]
-    param()
+    param(
+        [Parameter(Mandatory = $false)]
+        [hashtable]$MockOverrides = $null
+    )
 
     try {
-        # 1. Inspect Windows Servicing & Update Services
-        $servicingServices = @(
-            @{ Name = 'wuauserv'; Display = 'Windows Update Service' },
-            @{ Name = 'TrustedInstaller'; Display = 'Windows Modules Installer (TrustedInstaller)' },
-            @{ Name = 'UsoSvc'; Display = 'Update Session Orchestrator Service' },
-            @{ Name = 'WaaSMedicSvc'; Display = 'Windows Update Medic Service' }
-        )
-
-        foreach ($svcInfo in $servicingServices) {
-            try {
-                $svc = Get-Service -Name $svcInfo.Name -ErrorAction SilentlyContinue
-                if ($svc) {
-                    if ($svc.Status -in @('Running', 'StartPending', 'StopPending', 'ContinuePending', 'PausePending')) {
-                        return @{
-                            IsActive  = $true
-                            Reason    = "$($svcInfo.Display) ($($svcInfo.Name)) is currently $($svc.Status)."
-                            Component = $svcInfo.Name
-                        }
-                    }
+        # Support test mock overrides if provided
+        if ($null -ne $MockOverrides) {
+            if ($MockOverrides.ContainsKey('ForceUnknown') -and $MockOverrides['ForceUnknown']) {
+                throw [System.Exception]"Simulated servicing inspection error"
+            }
+            if ($MockOverrides.ContainsKey('ActiveBits') -and $MockOverrides['ActiveBits']) {
+                return @{
+                    IsActive  = $true
+                    Status    = "ACTIVE"
+                    Reason    = "Active BITS update/payload transfer jobs are in progress."
+                    Component = "bits"
                 }
-            } catch {}
+            }
+            if ($MockOverrides.ContainsKey('CbsRebootPending') -and $MockOverrides['CbsRebootPending']) {
+                return @{
+                    IsActive  = $true
+                    Status    = "ACTIVE"
+                    Reason    = "Windows CBS reports a reboot is pending to apply staged updates."
+                    Component = "CBS\RebootPending"
+                }
+            }
+            if ($MockOverrides.ContainsKey('CbsRebootInProgress') -and $MockOverrides['CbsRebootInProgress']) {
+                return @{
+                    IsActive  = $true
+                    Status    = "ACTIVE"
+                    Reason    = "Windows CBS reports update servicing is in progress."
+                    Component = "CBS\RebootInProgress"
+                }
+            }
+            if ($MockOverrides.ContainsKey('WuRebootRequired') -and $MockOverrides['WuRebootRequired']) {
+                return @{
+                    IsActive  = $true
+                    Status    = "ACTIVE"
+                    Reason    = "Windows Update reports a reboot is required to finalize installed updates."
+                    Component = "WindowsUpdate\RebootRequired"
+                }
+            }
         }
 
-        # 2. Check BITS (Background Intelligent Transfer Service) active jobs
+        # 1. Check Active BITS (Background Intelligent Transfer Service) Transfer Jobs
         try {
-            $bits = Get-Service -Name "bits" -ErrorAction SilentlyContinue
-            if ($bits -and $bits.Status -eq 'Running') {
-                $bitsJobs = Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue
-                if ($bitsJobs -and ($bitsJobs | Where-Object { $_.JobState -in @('Transferring', 'Connecting', 'Queued', 'Transferred') })) {
+            $bitsJobs = Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue
+            if ($bitsJobs) {
+                $activeBitsJobs = $bitsJobs | Where-Object { $_.JobState -in @('Transferring', 'Connecting', 'Queued', 'Transferred') }
+                if ($activeBitsJobs) {
                     return @{
                         IsActive  = $true
-                        Reason    = "BITS service is active with update transfer jobs in queue."
+                        Status    = "ACTIVE"
+                        Reason    = "Active BITS update/payload transfer jobs are in progress."
                         Component = "bits"
                     }
                 }
             }
         } catch {}
 
-        # 3. Check Component Based Servicing (CBS) Registry Reboot / Staging Keys
+        # 2. Check Component Based Servicing (CBS) Registry Reboot / Staging Keys
         $cbsRebootPending = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
         if (Test-Path -LiteralPath $cbsRebootPending) {
             return @{
                 IsActive  = $true
+                Status    = "ACTIVE"
                 Reason    = "Windows CBS reports a reboot is pending to apply staged updates."
                 Component = "CBS\RebootPending"
             }
@@ -145,6 +191,7 @@ function Test-WindowsServicingActive {
         if (Test-Path -LiteralPath $cbsRebootInProgress) {
             return @{
                 IsActive  = $true
+                Status    = "ACTIVE"
                 Reason    = "Windows CBS reports update servicing is in progress."
                 Component = "CBS\RebootInProgress"
             }
@@ -154,16 +201,18 @@ function Test-WindowsServicingActive {
         if (Test-Path -LiteralPath $cbsPackagesPending) {
             return @{
                 IsActive  = $true
+                Status    = "ACTIVE"
                 Reason    = "Windows CBS reports packages are pending servicing."
                 Component = "CBS\PackagesPending"
             }
         }
 
-        # 4. Check Windows Update AutoUpdate Reboot Required Keys
+        # 3. Check Windows Update AutoUpdate Reboot Required Keys
         $wuRebootRequired = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
         if (Test-Path -LiteralPath $wuRebootRequired) {
             return @{
                 IsActive  = $true
+                Status    = "ACTIVE"
                 Reason    = "Windows Update reports a reboot is required to finalize installed updates."
                 Component = "WindowsUpdate\RebootRequired"
             }
@@ -173,46 +222,52 @@ function Test-WindowsServicingActive {
         if (Test-Path -LiteralPath $wuPostReboot) {
             return @{
                 IsActive  = $true
+                Status    = "ACTIVE"
                 Reason    = "Windows Update is awaiting post-reboot servicing reporting."
                 Component = "WindowsUpdate\PostRebootReporting"
             }
         }
 
-        # 5. Check Session Manager PendingFileRenameOperations
+        # 4. Check Session Manager PendingFileRenameOperations
         try {
             $smKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
             $pendingRenames = (Get-ItemProperty -Path $smKey -Name "PendingFileRenameOperations" -ErrorAction SilentlyContinue).PendingFileRenameOperations
             if ($pendingRenames -and $pendingRenames.Count -gt 0) {
                 return @{
                     IsActive  = $true
+                    Status    = "ACTIVE"
                     Reason    = "System has PendingFileRenameOperations queued for next reboot."
                     Component = "SessionManager\PendingFileRenameOperations"
                 }
             }
         } catch {}
 
-        # 6. Check UpdateExeVolatile
+        # 5. Check UpdateExeVolatile
         try {
             $updateVolatileKey = "HKLM:\SOFTWARE\Microsoft\Updates"
             $volatileVal = (Get-ItemProperty -Path $updateVolatileKey -Name "UpdateExeVolatile" -ErrorAction SilentlyContinue).UpdateExeVolatile
             if ($null -ne $volatileVal -and [int]$volatileVal -ne 0) {
                 return @{
                     IsActive  = $true
+                    Status    = "ACTIVE"
                     Reason    = "UpdateExeVolatile flag is active ($volatileVal)."
                     Component = "Updates\UpdateExeVolatile"
                 }
             }
         } catch {}
 
+        # Idle: Services (e.g. wuauserv, TrustedInstaller) may be running, but there is no evidence of active update staging or pending reboots
         return @{
             IsActive  = $false
+            Status    = "IDLE"
             Reason    = "Servicing state is idle."
             Component = $null
         }
     } catch {
-        # Fail closed: if we cannot inspect servicing state, assume active to avoid corruption
+        # Fail Closed: If servicing state cannot be verified, fail closed
         return @{
             IsActive  = $true
+            Status    = "UNKNOWN"
             Reason    = "Unable to verify servicing state ($($_.Exception.Message)) - failing closed."
             Component = "Unknown"
         }
@@ -519,10 +574,11 @@ function Find-LargeFiles {
                 }
             }
 
-            # Enqueue subdirectories
+            # Enqueue subdirectories; skip all reparse points and unverified directories
             foreach ($sub in $dInfo.GetDirectories()) {
-                if ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                    continue # Skip symlinks/junctions
+                $reparseCheck = Test-ReparsePoint -Path $sub.FullName
+                if (-not $reparseCheck.Success -or $reparseCheck.IsReparsePoint) {
+                    continue # Skip symlinks/junctions/unverified reparse points
                 }
                 $dirQueue.Enqueue($sub.FullName)
             }
@@ -723,8 +779,12 @@ function Remove-ItemPermanently {
 
     try {
         if (Test-Path -LiteralPath $Path -PathType Container) {
-            $isReparse = Test-ReparsePoint -Path $Path
-            if ($isReparse) {
+            $reparseCheck = Test-ReparsePoint -Path $Path
+            if (-not $reparseCheck.Success) {
+                return @{ Success = $false; Message = "Action Blocked: Could not verify reparse point status ($($reparseCheck.Reason))." }
+            }
+
+            if ($reparseCheck.IsReparsePoint) {
                 [System.IO.Directory]::Delete($Path, $false)
             } else {
                 [System.IO.Directory]::Delete($Path, $true)
@@ -769,8 +829,9 @@ function Get-FolderSizeFast {
                     } catch {}
                 }
                 foreach ($sub in $dirInfo.EnumerateDirectories()) {
-                    # Skip symlinks and junctions to avoid infinite loops and external traversal
-                    if ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    # Skip symlinks, junctions, and unverified reparse points to avoid external traversal
+                    $reparseCheck = Test-ReparsePoint -Path $sub.FullName
+                    if (-not $reparseCheck.Success -or $reparseCheck.IsReparsePoint) {
                         continue
                     }
                     $queue.Enqueue($sub.FullName)
@@ -1328,25 +1389,55 @@ function Get-CleanableCategoryFiles {
 
     if (Test-Path -LiteralPath $target.Path) {
         try {
-            $dirInfo = New-Object System.IO.DirectoryInfo($target.Path)
-            $files = $dirInfo.EnumerateFiles('*', [System.IO.SearchOption]::AllDirectories)
-            $count = 0
-            foreach ($f in $files) {
-                if ($count -ge $Limit) { break }
-                $fileList += [PSCustomObject]@{
-                    Name          = $f.Name
-                    FullPath      = $f.FullName
-                    RawBytes      = [long]$f.Length
-                    DisplaySize   = Format-Bytes -Bytes $f.Length
-                    LastWriteTime = $f.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
-                    Extension     = $f.Extension
-                }
-                $count++
+            $targetSafety = Test-PathSafety -Path $target.Path
+            if (-not $targetSafety.Safe) {
+                return @()
+            }
+
+            # Queue-based safe traversal: never follow or recurse through reparse points
+            $queue = New-Object System.Collections.Generic.Queue[string]
+            $queue.Enqueue($target.Path)
+            $maxInspectItems = 5000
+            $inspectedCount = 0
+
+            while ($queue.Count -gt 0 -and $inspectedCount -lt $maxInspectItems) {
+                $current = $queue.Dequeue()
+                try {
+                    $dirInfo = New-Object System.IO.DirectoryInfo($current)
+
+                    # Enumerate direct files in current directory
+                    foreach ($f in $dirInfo.EnumerateFiles()) {
+                        try {
+                            $fileSafety = Test-PathSafety -Path $f.FullName
+                            if (-not $fileSafety.Safe) { continue }
+
+                            $fileList += [PSCustomObject]@{
+                                Name          = $f.Name
+                                FullPath      = $f.FullName
+                                RawBytes      = [long]$f.Length
+                                DisplaySize   = Format-Bytes -Bytes $f.Length
+                                LastWriteTime = $f.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
+                                Extension     = $f.Extension
+                            }
+                            $inspectedCount++
+                        } catch {}
+                    }
+
+                    # Enumerate direct subdirectories; skip all reparse points
+                    foreach ($sub in $dirInfo.EnumerateDirectories()) {
+                        $reparseCheck = Test-ReparsePoint -Path $sub.FullName
+                        if (-not $reparseCheck.Success -or $reparseCheck.IsReparsePoint) {
+                            # Skip reparse points and unverified directories
+                            continue
+                        }
+                        $queue.Enqueue($sub.FullName)
+                    }
+                } catch {}
             }
         } catch {}
     }
 
-    return ($fileList | Sort-Object RawBytes -Descending)
+    return ($fileList | Sort-Object RawBytes -Descending | Select-Object -First $Limit)
 }
 
 function Invoke-ExecuteCleanup {
@@ -1462,8 +1553,18 @@ function Invoke-ExecuteCleanup {
                         if ($entry.PSIsContainer) {
                             $entryBytes = (Get-FolderSizeFast -Path $entry.FullName).RawBytes
 
-                            # Detect Reparse Points / Junctions / Symbolic Links
-                            if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                            # Detect Reparse Points / Junctions / Symbolic Links (Fail-Closed)
+                            $reparseCheck = Test-ReparsePoint -Path $entry.FullName
+                            if (-not $reparseCheck.Success) {
+                                # Unknown reparse state = do not delete
+                                $catSkippedCount++
+                                if ($null -ne $OnProgress) {
+                                    & $OnProgress "  [SAFETY GUARD] Skipped unverified reparse item: $($entry.Name) ($($reparseCheck.Reason))" "WARN"
+                                }
+                                continue
+                            }
+
+                            if ($reparseCheck.IsReparsePoint) {
                                 # Delete only the link itself without recursive traversal
                                 try {
                                     [System.IO.Directory]::Delete($entry.FullName, $false)

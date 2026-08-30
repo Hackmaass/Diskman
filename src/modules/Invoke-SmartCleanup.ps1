@@ -26,8 +26,9 @@ function Get-FolderSizeFast {
                     } catch {}
                 }
                 foreach ($sub in $dirInfo.EnumerateDirectories()) {
-                    # Skip symlinks and junctions to avoid infinite loops and external traversal
-                    if ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    # Skip symlinks, junctions, and unverified reparse points to avoid external traversal
+                    $reparseCheck = Test-ReparsePoint -Path $sub.FullName
+                    if (-not $reparseCheck.Success -or $reparseCheck.IsReparsePoint) {
                         continue
                     }
                     $queue.Enqueue($sub.FullName)
@@ -585,25 +586,55 @@ function Get-CleanableCategoryFiles {
 
     if (Test-Path -LiteralPath $target.Path) {
         try {
-            $dirInfo = New-Object System.IO.DirectoryInfo($target.Path)
-            $files = $dirInfo.EnumerateFiles('*', [System.IO.SearchOption]::AllDirectories)
-            $count = 0
-            foreach ($f in $files) {
-                if ($count -ge $Limit) { break }
-                $fileList += [PSCustomObject]@{
-                    Name          = $f.Name
-                    FullPath      = $f.FullName
-                    RawBytes      = [long]$f.Length
-                    DisplaySize   = Format-Bytes -Bytes $f.Length
-                    LastWriteTime = $f.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
-                    Extension     = $f.Extension
-                }
-                $count++
+            $targetSafety = Test-PathSafety -Path $target.Path
+            if (-not $targetSafety.Safe) {
+                return @()
+            }
+
+            # Queue-based safe traversal: never follow or recurse through reparse points
+            $queue = New-Object System.Collections.Generic.Queue[string]
+            $queue.Enqueue($target.Path)
+            $maxInspectItems = 5000
+            $inspectedCount = 0
+
+            while ($queue.Count -gt 0 -and $inspectedCount -lt $maxInspectItems) {
+                $current = $queue.Dequeue()
+                try {
+                    $dirInfo = New-Object System.IO.DirectoryInfo($current)
+
+                    # Enumerate direct files in current directory
+                    foreach ($f in $dirInfo.EnumerateFiles()) {
+                        try {
+                            $fileSafety = Test-PathSafety -Path $f.FullName
+                            if (-not $fileSafety.Safe) { continue }
+
+                            $fileList += [PSCustomObject]@{
+                                Name          = $f.Name
+                                FullPath      = $f.FullName
+                                RawBytes      = [long]$f.Length
+                                DisplaySize   = Format-Bytes -Bytes $f.Length
+                                LastWriteTime = $f.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
+                                Extension     = $f.Extension
+                            }
+                            $inspectedCount++
+                        } catch {}
+                    }
+
+                    # Enumerate direct subdirectories; skip all reparse points
+                    foreach ($sub in $dirInfo.EnumerateDirectories()) {
+                        $reparseCheck = Test-ReparsePoint -Path $sub.FullName
+                        if (-not $reparseCheck.Success -or $reparseCheck.IsReparsePoint) {
+                            # Skip reparse points and unverified directories
+                            continue
+                        }
+                        $queue.Enqueue($sub.FullName)
+                    }
+                } catch {}
             }
         } catch {}
     }
 
-    return ($fileList | Sort-Object RawBytes -Descending)
+    return ($fileList | Sort-Object RawBytes -Descending | Select-Object -First $Limit)
 }
 
 function Invoke-ExecuteCleanup {
@@ -719,8 +750,18 @@ function Invoke-ExecuteCleanup {
                         if ($entry.PSIsContainer) {
                             $entryBytes = (Get-FolderSizeFast -Path $entry.FullName).RawBytes
 
-                            # Detect Reparse Points / Junctions / Symbolic Links
-                            if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                            # Detect Reparse Points / Junctions / Symbolic Links (Fail-Closed)
+                            $reparseCheck = Test-ReparsePoint -Path $entry.FullName
+                            if (-not $reparseCheck.Success) {
+                                # Unknown reparse state = do not delete
+                                $catSkippedCount++
+                                if ($null -ne $OnProgress) {
+                                    & $OnProgress "  [SAFETY GUARD] Skipped unverified reparse item: $($entry.Name) ($($reparseCheck.Reason))" "WARN"
+                                }
+                                continue
+                            }
+
+                            if ($reparseCheck.IsReparsePoint) {
                                 # Delete only the link itself without recursive traversal
                                 try {
                                     [System.IO.Directory]::Delete($entry.FullName, $false)

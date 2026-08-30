@@ -57,71 +57,117 @@ function Test-ReparsePoint {
         [string]$Path
     )
 
+    # Fail Closed: empty, null, or whitespace cannot be verified
     if ([string]::IsNullOrWhiteSpace($Path)) {
-        return $false
+        return @{
+            Success        = $false
+            IsReparsePoint = $true
+            Reason         = "Path is empty or null (failing closed as reparse point)."
+        }
     }
 
     try {
-        if (Test-Path -LiteralPath $Path) {
-            $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-            if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-                return $true
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return @{
+                Success        = $true
+                IsReparsePoint = $false
+                Reason         = "Path does not exist."
             }
         }
-        return $false
+
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($null -ne $item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            return @{
+                Success        = $true
+                IsReparsePoint = $true
+                Reason         = "Reparse point (junction / symlink) detected."
+            }
+        }
+
+        return @{
+            Success        = $true
+            IsReparsePoint = $false
+            Reason         = "Normal non-reparse file system item."
+        }
     } catch {
-        return $false
+        # Fail Closed: Any metadata access or inspection failure is treated as unsafe/reparse
+        return @{
+            Success        = $false
+            IsReparsePoint = $true
+            Reason         = "Reparse inspection failed ($($_.Exception.Message)) - failing closed."
+        }
     }
 }
 
 function Test-WindowsServicingActive {
     [CmdletBinding()]
-    param()
+    param(
+        [Parameter(Mandatory = $false)]
+        [hashtable]$MockOverrides = $null
+    )
 
     try {
-        # 1. Inspect Windows Servicing & Update Services
-        $servicingServices = @(
-            @{ Name = 'wuauserv'; Display = 'Windows Update Service' },
-            @{ Name = 'TrustedInstaller'; Display = 'Windows Modules Installer (TrustedInstaller)' },
-            @{ Name = 'UsoSvc'; Display = 'Update Session Orchestrator Service' },
-            @{ Name = 'WaaSMedicSvc'; Display = 'Windows Update Medic Service' }
-        )
-
-        foreach ($svcInfo in $servicingServices) {
-            try {
-                $svc = Get-Service -Name $svcInfo.Name -ErrorAction SilentlyContinue
-                if ($svc) {
-                    if ($svc.Status -in @('Running', 'StartPending', 'StopPending', 'ContinuePending', 'PausePending')) {
-                        return @{
-                            IsActive  = $true
-                            Reason    = "$($svcInfo.Display) ($($svcInfo.Name)) is currently $($svc.Status)."
-                            Component = $svcInfo.Name
-                        }
-                    }
+        # Support test mock overrides if provided
+        if ($null -ne $MockOverrides) {
+            if ($MockOverrides.ContainsKey('ForceUnknown') -and $MockOverrides['ForceUnknown']) {
+                throw [System.Exception]"Simulated servicing inspection error"
+            }
+            if ($MockOverrides.ContainsKey('ActiveBits') -and $MockOverrides['ActiveBits']) {
+                return @{
+                    IsActive  = $true
+                    Status    = "ACTIVE"
+                    Reason    = "Active BITS update/payload transfer jobs are in progress."
+                    Component = "bits"
                 }
-            } catch {}
+            }
+            if ($MockOverrides.ContainsKey('CbsRebootPending') -and $MockOverrides['CbsRebootPending']) {
+                return @{
+                    IsActive  = $true
+                    Status    = "ACTIVE"
+                    Reason    = "Windows CBS reports a reboot is pending to apply staged updates."
+                    Component = "CBS\RebootPending"
+                }
+            }
+            if ($MockOverrides.ContainsKey('CbsRebootInProgress') -and $MockOverrides['CbsRebootInProgress']) {
+                return @{
+                    IsActive  = $true
+                    Status    = "ACTIVE"
+                    Reason    = "Windows CBS reports update servicing is in progress."
+                    Component = "CBS\RebootInProgress"
+                }
+            }
+            if ($MockOverrides.ContainsKey('WuRebootRequired') -and $MockOverrides['WuRebootRequired']) {
+                return @{
+                    IsActive  = $true
+                    Status    = "ACTIVE"
+                    Reason    = "Windows Update reports a reboot is required to finalize installed updates."
+                    Component = "WindowsUpdate\RebootRequired"
+                }
+            }
         }
 
-        # 2. Check BITS (Background Intelligent Transfer Service) active jobs
+        # 1. Check Active BITS (Background Intelligent Transfer Service) Transfer Jobs
         try {
-            $bits = Get-Service -Name "bits" -ErrorAction SilentlyContinue
-            if ($bits -and $bits.Status -eq 'Running') {
-                $bitsJobs = Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue
-                if ($bitsJobs -and ($bitsJobs | Where-Object { $_.JobState -in @('Transferring', 'Connecting', 'Queued', 'Transferred') })) {
+            $bitsJobs = Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue
+            if ($bitsJobs) {
+                $activeBitsJobs = $bitsJobs | Where-Object { $_.JobState -in @('Transferring', 'Connecting', 'Queued', 'Transferred') }
+                if ($activeBitsJobs) {
                     return @{
                         IsActive  = $true
-                        Reason    = "BITS service is active with update transfer jobs in queue."
+                        Status    = "ACTIVE"
+                        Reason    = "Active BITS update/payload transfer jobs are in progress."
                         Component = "bits"
                     }
                 }
             }
         } catch {}
 
-        # 3. Check Component Based Servicing (CBS) Registry Reboot / Staging Keys
+        # 2. Check Component Based Servicing (CBS) Registry Reboot / Staging Keys
         $cbsRebootPending = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
         if (Test-Path -LiteralPath $cbsRebootPending) {
             return @{
                 IsActive  = $true
+                Status    = "ACTIVE"
                 Reason    = "Windows CBS reports a reboot is pending to apply staged updates."
                 Component = "CBS\RebootPending"
             }
@@ -131,6 +177,7 @@ function Test-WindowsServicingActive {
         if (Test-Path -LiteralPath $cbsRebootInProgress) {
             return @{
                 IsActive  = $true
+                Status    = "ACTIVE"
                 Reason    = "Windows CBS reports update servicing is in progress."
                 Component = "CBS\RebootInProgress"
             }
@@ -140,16 +187,18 @@ function Test-WindowsServicingActive {
         if (Test-Path -LiteralPath $cbsPackagesPending) {
             return @{
                 IsActive  = $true
+                Status    = "ACTIVE"
                 Reason    = "Windows CBS reports packages are pending servicing."
                 Component = "CBS\PackagesPending"
             }
         }
 
-        # 4. Check Windows Update AutoUpdate Reboot Required Keys
+        # 3. Check Windows Update AutoUpdate Reboot Required Keys
         $wuRebootRequired = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
         if (Test-Path -LiteralPath $wuRebootRequired) {
             return @{
                 IsActive  = $true
+                Status    = "ACTIVE"
                 Reason    = "Windows Update reports a reboot is required to finalize installed updates."
                 Component = "WindowsUpdate\RebootRequired"
             }
@@ -159,46 +208,52 @@ function Test-WindowsServicingActive {
         if (Test-Path -LiteralPath $wuPostReboot) {
             return @{
                 IsActive  = $true
+                Status    = "ACTIVE"
                 Reason    = "Windows Update is awaiting post-reboot servicing reporting."
                 Component = "WindowsUpdate\PostRebootReporting"
             }
         }
 
-        # 5. Check Session Manager PendingFileRenameOperations
+        # 4. Check Session Manager PendingFileRenameOperations
         try {
             $smKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
             $pendingRenames = (Get-ItemProperty -Path $smKey -Name "PendingFileRenameOperations" -ErrorAction SilentlyContinue).PendingFileRenameOperations
             if ($pendingRenames -and $pendingRenames.Count -gt 0) {
                 return @{
                     IsActive  = $true
+                    Status    = "ACTIVE"
                     Reason    = "System has PendingFileRenameOperations queued for next reboot."
                     Component = "SessionManager\PendingFileRenameOperations"
                 }
             }
         } catch {}
 
-        # 6. Check UpdateExeVolatile
+        # 5. Check UpdateExeVolatile
         try {
             $updateVolatileKey = "HKLM:\SOFTWARE\Microsoft\Updates"
             $volatileVal = (Get-ItemProperty -Path $updateVolatileKey -Name "UpdateExeVolatile" -ErrorAction SilentlyContinue).UpdateExeVolatile
             if ($null -ne $volatileVal -and [int]$volatileVal -ne 0) {
                 return @{
                     IsActive  = $true
+                    Status    = "ACTIVE"
                     Reason    = "UpdateExeVolatile flag is active ($volatileVal)."
                     Component = "Updates\UpdateExeVolatile"
                 }
             }
         } catch {}
 
+        # Idle: Services (e.g. wuauserv, TrustedInstaller) may be running, but there is no evidence of active update staging or pending reboots
         return @{
             IsActive  = $false
+            Status    = "IDLE"
             Reason    = "Servicing state is idle."
             Component = $null
         }
     } catch {
-        # Fail closed: if we cannot inspect servicing state, assume active to avoid corruption
+        # Fail Closed: If servicing state cannot be verified, fail closed
         return @{
             IsActive  = $true
+            Status    = "UNKNOWN"
             Reason    = "Unable to verify servicing state ($($_.Exception.Message)) - failing closed."
             Component = "Unknown"
         }

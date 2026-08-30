@@ -95,8 +95,12 @@ function Remove-ItemPermanently {
 
     try {
         if (Test-Path -LiteralPath $Path -PathType Container) {
-            $isReparse = Test-ReparsePoint -Path $Path
-            if ($isReparse) {
+            $reparseCheck = Test-ReparsePoint -Path $Path
+            if (-not $reparseCheck.Success) {
+                return @{ Success = $false; Message = "Action Blocked: Could not verify reparse point status ($($reparseCheck.Reason))." }
+            }
+
+            if ($reparseCheck.IsReparsePoint) {
                 [System.IO.Directory]::Delete($Path, $false)
             } else {
                 [System.IO.Directory]::Delete($Path, $true)

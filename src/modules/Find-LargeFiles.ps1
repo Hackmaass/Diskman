@@ -79,10 +79,11 @@ function Find-LargeFiles {
                 }
             }
 
-            # Enqueue subdirectories
+            # Enqueue subdirectories; skip all reparse points and unverified directories
             foreach ($sub in $dInfo.GetDirectories()) {
-                if ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                    continue # Skip symlinks/junctions
+                $reparseCheck = Test-ReparsePoint -Path $sub.FullName
+                if (-not $reparseCheck.Success -or $reparseCheck.IsReparsePoint) {
+                    continue # Skip symlinks/junctions/unverified reparse points
                 }
                 $dirQueue.Enqueue($sub.FullName)
             }
