@@ -497,7 +497,8 @@ $cmbHuntCat.Items.Add("Disk Image / ISO")      | Out-Null
 $cmbHuntCat.Items.Add("Archive / Zip")         | Out-Null
 $cmbHuntCat.Items.Add("Video / Media")         | Out-Null
 $cmbHuntCat.Items.Add("Log / Dump File")       | Out-Null
-$cmbHuntCat.Items.Add("AI Model / Weights")    | Out-Null
+$cmbHuntCat.Items.Add("AI Model / Weights")         | Out-Null
+$cmbHuntCat.Items.Add("Incomplete / Temp Download") | Out-Null
 $cmbHuntCat.SelectedIndex = 0
 
 $btnHuntScan.add_Click({

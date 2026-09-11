@@ -278,6 +278,36 @@ foreach ($fn in $functions) {
     Assert-Test "Function $fn is available" $hasFn
 }
 
+# Test Find-LargeFiles AI & Incomplete Download Classification
+$hunterTestDir = Join-Path ([System.IO.Path]::GetTempPath()) ("Diskman_HuntTest_" + [System.Guid]::NewGuid().ToString("N"))
+try {
+    New-Item -Path $hunterTestDir -ItemType Directory -Force | Out-Null
+    
+    # Create test dummy files (each 1.5MB)
+    $dummyBytes = New-Object byte[] (1.5MB)
+    [System.IO.File]::WriteAllBytes((Join-Path $hunterTestDir "Qwen3.5-9B-Model.part"), $dummyBytes)
+    [System.IO.File]::WriteAllBytes((Join-Path $hunterTestDir "random_download.part"), $dummyBytes)
+    [System.IO.File]::WriteAllBytes((Join-Path $hunterTestDir "installer.exe"), $dummyBytes)
+
+    $allFound = Find-LargeFiles -TargetPath $hunterTestDir -MinSizeBytes 1MB -CategoryFilter "All Categories"
+    $aiFound  = Find-LargeFiles -TargetPath $hunterTestDir -MinSizeBytes 1MB -CategoryFilter "AI Model / Weights"
+    $partFound = Find-LargeFiles -TargetPath $hunterTestDir -MinSizeBytes 1MB -CategoryFilter "Incomplete / Temp Download"
+
+    $qwenItem = $allFound | Where-Object { $_.Name -like "*Qwen*" } | Select-Object -First 1
+    Assert-Test "Find-LargeFiles classifies .part AI model as 'AI Model / Weights'" ($qwenItem.Category -eq "AI Model / Weights") "Category: $($qwenItem.Category)"
+
+    $randItem = $allFound | Where-Object { $_.Name -like "*random_download*" } | Select-Object -First 1
+    Assert-Test "Find-LargeFiles classifies generic .part as 'Incomplete / Temp Download'" ($randItem.Category -eq "Incomplete / Temp Download") "Category: $($randItem.Category)"
+
+    Assert-Test "Find-LargeFiles category filter 'AI Model / Weights' matches model .part" (@($aiFound | Where-Object { $_.Name -like "*Qwen*" }).Count -eq 1 -and @($aiFound | Where-Object { $_.Name -like "*random_download*" }).Count -eq 0)
+
+    Assert-Test "Find-LargeFiles category filter 'Incomplete / Temp Download' matches generic .part" (@($partFound | Where-Object { $_.Name -like "*random_download*" }).Count -eq 1 -and @($partFound | Where-Object { $_.Name -like "*Qwen*" }).Count -eq 0)
+} finally {
+    if (Test-Path -LiteralPath $hunterTestDir) {
+        Remove-Item -LiteralPath $hunterTestDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # 7. Standalone Compilation & Release AST Parsing
 Write-Host "`n[7/7] Compiling Standalone Distribution Bundle & Syntax Verification..." -ForegroundColor Yellow
 & (Join-Path $ScriptDir "Compile.ps1")

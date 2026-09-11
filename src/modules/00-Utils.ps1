@@ -75,8 +75,8 @@ function Test-ReparsePoint {
             }
         }
 
-        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-        if ($null -ne $item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        $attr = [System.IO.File]::GetAttributes($Path)
+        if ($attr -band [System.IO.FileAttributes]::ReparsePoint) {
             return @{
                 Success        = $true
                 IsReparsePoint = $true

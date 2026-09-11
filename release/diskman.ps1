@@ -89,8 +89,8 @@ function Test-ReparsePoint {
             }
         }
 
-        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-        if ($null -ne $item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        $attr = [System.IO.File]::GetAttributes($Path)
+        if ($attr -band [System.IO.FileAttributes]::ReparsePoint) {
             return @{
                 Success        = $true
                 IsReparsePoint = $true
@@ -506,7 +506,10 @@ function Find-LargeFiles {
         [string]$CategoryFilter = "All Categories",
 
         [Parameter(Mandatory = $false)]
-        [int]$Limit = 100
+        [int]$Limit = 100,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxFolders = 30000
     )
 
     if (-not (Test-Path -LiteralPath $TargetPath)) {
@@ -515,26 +518,66 @@ function Find-LargeFiles {
 
     $results = @()
 
-    $installerExt = @(".exe", ".msi", ".pkg", ".appinstaller", ".cab")
-    $diskExt      = @(".iso", ".vhd", ".vhdx", ".img", ".vmdk", ".qcow2")
-    $archiveExt   = @(".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz")
+    $installerExt = @(".exe", ".msi", ".pkg", ".appinstaller", ".cab", ".msu")
+    $diskExt      = @(".iso", ".vhd", ".vhdx", ".img", ".vmdk", ".qcow2", ".wim")
+    $archiveExt   = @(".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".tgz")
     $videoExt     = @(".mp4", ".mkv", ".mov", ".avi", ".webm", ".wmv", ".flv", ".m4v", ".ts")
-    $aiExt        = @(".bin", ".safetensors", ".gguf", ".pt", ".pth", ".onnx", ".model", ".h5", ".ckpt")
+    $aiExt        = @(".bin", ".safetensors", ".gguf", ".pt", ".pth", ".onnx", ".model", ".h5", ".ckpt", ".weight", ".weights", ".safetensor")
     $logExt       = @(".log", ".dmp", ".trace", ".etl", ".bak", ".old")
     $dataExt      = @(".csv", ".parquet", ".db", ".sqlite", ".sql")
+    $partExt      = @(".part", ".crdownload", ".download", ".partial")
+
+    $sysRoot = if ($env:SystemRoot) { $env:SystemRoot.TrimEnd('\', '/') } else { "C:\Windows" }
+    $userProfile = if ($env:USERPROFILE) { $env:USERPROFILE.TrimEnd('\', '/') } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile).TrimEnd('\', '/') }
+    $usersRoot = [System.IO.Path]::GetDirectoryName($userProfile)
+    if ([string]::IsNullOrWhiteSpace($usersRoot)) { $usersRoot = "C:\Users" }
 
     $dirQueue = New-Object System.Collections.Generic.Queue[string]
-    $dirQueue.Enqueue($TargetPath)
+
+    # If scanning drive root, prioritize User profiles first, then custom drive directories, and skip Windows OS tree
+    $isDriveRoot = ($TargetPath -match '^[A-Za-z]:\\?$')
+    if ($isDriveRoot) {
+        if (Test-Path -LiteralPath $usersRoot) {
+            # Enqueue current user profile first, then other profiles
+            if (Test-Path -LiteralPath $userProfile) {
+                $dirQueue.Enqueue($userProfile)
+            }
+            try {
+                $uDir = New-Object System.IO.DirectoryInfo($usersRoot)
+                foreach ($sub in $uDir.EnumerateDirectories()) {
+                    if ($sub.FullName -ine $userProfile -and (-not ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint))) {
+                        $dirQueue.Enqueue($sub.FullName)
+                    }
+                }
+            } catch {}
+        }
+
+        # Enqueue other root drive folders except Windows and Users
+        try {
+            $rootInfo = New-Object System.IO.DirectoryInfo($TargetPath)
+            foreach ($sub in $rootInfo.EnumerateDirectories()) {
+                if ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+                if ($sub.FullName -ieq $usersRoot -or $sub.FullName -ieq $sysRoot) { continue }
+                if ($sub.Name -ieq "`$Recycle.Bin" -or $sub.Name -ieq "System Volume Information" -or $sub.Name -ieq "`$WinREAgent") { continue }
+                $dirQueue.Enqueue($sub.FullName)
+            }
+        } catch {}
+    } else {
+        $dirQueue.Enqueue($TargetPath)
+    }
 
     $scannedFolders = 0
-    $maxFolders = 2500 # safeguard against infinite loops or slow drives
 
-    while ($dirQueue.Count -gt 0 -and $scannedFolders -lt $maxFolders) {
+    while ($dirQueue.Count -gt 0 -and $scannedFolders -lt $MaxFolders) {
         $currentDir = $dirQueue.Dequeue()
         $scannedFolders++
 
-        # Skip system protected folders
-        if ($currentDir -match '\\\$RECYCLE\.BIN|\\System Volume Information|\\AppData\\Local\\Application Data|\\Windows\\WinSxS|\\Windows\\System32|\\Windows\\SysWOW64|\\Windows\\SystemApps|\\Windows\\assembly') {
+        # Skip system protected folders unless explicitly targeted by the caller
+        if ($isDriveRoot -and ($currentDir -ieq $sysRoot -or $currentDir -ilike "$sysRoot\*")) {
+            continue
+        }
+
+        if ($currentDir -match '\\\$RECYCLE\.BIN|\\System Volume Information|\\AppData\\Local\\Application Data|\\assembly') {
             continue
         }
 
@@ -542,10 +585,9 @@ function Find-LargeFiles {
             $dInfo = New-Object System.IO.DirectoryInfo($currentDir)
             
             # Check direct files
-            $files = $dInfo.GetFiles()
-            foreach ($f in $files) {
+            foreach ($f in $dInfo.EnumerateFiles()) {
                 if ($f.Length -ge $MinSizeBytes) {
-                    # Safety check on file
+                    # Safety check on file: block critical OS files
                     $safety = Test-PathSafety -Path $f.FullName
                     if (-not $safety.Safe) { continue }
 
@@ -559,8 +601,22 @@ function Find-LargeFiles {
                     elseif ($ext -in $logExt) { $cat = "Log / Dump File" }
                     elseif ($ext -in $aiExt) { $cat = "AI Model / Weights" }
                     elseif ($ext -in $dataExt) { $cat = "Dataset / Database" }
+                    elseif ($ext -in $partExt) {
+                        # Distinguish AI model downloads from generic partial downloads
+                        if ($f.Name -match '(?i)qwen|llama|gemma|mistral|deepseek|gguf|safetensors|model|bert|whisper|weights|phi' -or
+                            $f.FullName -match '(?i)\\models\\|\\hermes\\|\\ollama\\|\\huggingface\\|\\text-generation-webui|\\lm-studio') {
+                            $cat = "AI Model / Weights"
+                        } else {
+                            $cat = "Incomplete / Temp Download"
+                        }
+                    }
 
-                    if ($CategoryFilter -eq "All Categories" -or $cat -like "*$CategoryFilter*") {
+                    $matchesCat = ($CategoryFilter -eq "All Categories" -or
+                        $cat -like "*$CategoryFilter*" -or
+                        ($CategoryFilter -eq "AI Model / Weights" -and $cat -like "*AI Model*") -or
+                        ($CategoryFilter -eq "Incomplete / Temp Download" -and ($cat -like "*Incomplete*" -or $cat -like "*Download*")))
+
+                    if ($matchesCat) {
                         $results += [PSCustomObject]@{
                             Name          = $f.Name
                             FullPath      = $f.FullName
@@ -574,11 +630,14 @@ function Find-LargeFiles {
                 }
             }
 
-            # Enqueue subdirectories; skip all reparse points and unverified directories
-            foreach ($sub in $dInfo.GetDirectories()) {
-                $reparseCheck = Test-ReparsePoint -Path $sub.FullName
-                if (-not $reparseCheck.Success -or $reparseCheck.IsReparsePoint) {
-                    continue # Skip symlinks/junctions/unverified reparse points
+            # Enqueue subdirectories
+            foreach ($sub in $dInfo.EnumerateDirectories()) {
+                if ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    continue
+                }
+                # Skip package node_modules or .git during broad disk search
+                if ($sub.Name -ieq "node_modules" -or $sub.Name -ieq ".git") {
+                    continue
                 }
                 $dirQueue.Enqueue($sub.FullName)
             }
@@ -591,7 +650,7 @@ function Find-LargeFiles {
         }
     }
 
-    return ($results | Sort-Object RawSize -Descending | Select-Object -First $Limit)
+    return @($results | Sort-Object RawSize -Descending | Select-Object -First $Limit)
 }
 
 
@@ -2947,7 +3006,8 @@ $cmbHuntCat.Items.Add("Disk Image / ISO")      | Out-Null
 $cmbHuntCat.Items.Add("Archive / Zip")         | Out-Null
 $cmbHuntCat.Items.Add("Video / Media")         | Out-Null
 $cmbHuntCat.Items.Add("Log / Dump File")       | Out-Null
-$cmbHuntCat.Items.Add("AI Model / Weights")    | Out-Null
+$cmbHuntCat.Items.Add("AI Model / Weights")         | Out-Null
+$cmbHuntCat.Items.Add("Incomplete / Temp Download") | Out-Null
 $cmbHuntCat.SelectedIndex = 0
 
 $btnHuntScan.add_Click({
