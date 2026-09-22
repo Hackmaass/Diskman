@@ -6,10 +6,10 @@
         WindowStartupLocation="CenterScreen"
         Background="#141416"
         Foreground="#EDEDED"
-        FontFamily="Segoe UI, -apple-system, BlinkMacSystemFont, Roboto, sans-serif"
+        FontFamily="Segoe UI"
         UseLayoutRounding="True"
         SnapsToDevicePixels="True"
-        TextOptions.TextFormattingMode="Display"
+        TextOptions.TextFormattingMode="Ideal"
         TextOptions.TextRenderingMode="ClearType"
         RenderOptions.ClearTypeHint="Enabled">
 
@@ -408,7 +408,9 @@
                     </Grid>
 
                     <!-- Junk Categories DataGrid -->
-                    <DataGrid x:Name="GridCleanableCategories" Grid.Row="1" AutoGenerateColumns="False">
+                    <DataGrid x:Name="GridCleanableCategories" Grid.Row="1" AutoGenerateColumns="False"
+                              CanUserAddRows="False" CanUserDeleteRows="False" CanUserResizeRows="False"
+                              VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.ScrollUnit="Pixel">
                         <DataGrid.Columns>
                             <DataGridCheckBoxColumn Header="Clean?" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="55"/>
                             <DataGridTextColumn Header="Category" Binding="{Binding DisplayName}" Width="240" FontWeight="SemiBold"/>
@@ -420,27 +422,83 @@
                         </DataGrid.Columns>
                     </DataGrid>
 
-                    <!-- Bottom Action Controls for Selected Category -->
-                    <Grid Grid.Row="2" Margin="0,10,0,0">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
+                    <!-- Category Safety & Deletion Details Card (Fixed Height = Zero Layout Shift) -->
+                    <Border Grid.Row="2" Height="148" Background="#1B1B1F" BorderBrush="#333338" BorderThickness="1" CornerRadius="6" Margin="0,10,0,0" Padding="12,10">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
 
-                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                            <TextBlock x:Name="TxtSelectedCategoryInfo" Text="Select a category above to view files in File Explorer or clean individually." Foreground="#A1A1AA" FontSize="12"/>
-                            <TextBlock x:Name="TxtSelectedCategoryDesc" Text="" Foreground="#71717A" FontSize="11" Margin="0,2,0,0"/>
-                        </StackPanel>
+                            <!-- Header Row: Category Title + Safety Badge Pill + Action Buttons -->
+                            <Grid Grid.Row="0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
 
-                        <!-- Step 1: Open in Explorer (User requirement) -->
-                        <Button x:Name="BtnOpenCategoryInExplorer" Grid.Column="1" Content="Open in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,8,0"/>
-                        <!-- Step 2: In-app File Inspector -->
-                        <Button x:Name="BtnInspectCategoryFiles" Grid.Column="2" Content="View Files in Inspector" Margin="0,0,8,0"/>
-                        <!-- Step 3: Clean Single Category -->
-                        <Button x:Name="BtnCleanSingleCategory" Grid.Column="3" Content="Clean Category" Style="{StaticResource DangerActionBtn}"/>
-                    </Grid>
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <TextBlock x:Name="TxtSelectedCategoryTitle" Text="Category Details &amp; Safety Profile" FontWeight="Bold" FontSize="13" Foreground="#EDEDED" VerticalAlignment="Center"/>
+                                    <Border x:Name="BadgeSafetyLevel" Background="#2EC4B6" CornerRadius="3" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center" MinWidth="68">
+                                        <TextBlock x:Name="TxtSelectedCategorySafetyBadge" Text="SAFE" FontSize="10" FontWeight="Bold" Foreground="#141416" TextAlignment="Center" HorizontalAlignment="Center"/>
+                                    </Border>
+                                    <TextBlock x:Name="TxtSelectedCategorySizeInfo" Text="" Foreground="#A1A1AA" FontSize="12" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                                    <!-- Compatibility references (collapsed) -->
+                                    <TextBlock x:Name="TxtSelectedCategoryInfo" Visibility="Collapsed"/>
+                                    <TextBlock x:Name="TxtSelectedCategoryDesc" Visibility="Collapsed"/>
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                                    <Button x:Name="BtnOpenCategoryInExplorer" Content="Open in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,6,0"/>
+                                    <Button x:Name="BtnInspectCategoryFiles" Content="View Files in Inspector" Margin="0,0,6,0"/>
+                                    <Button x:Name="BtnCleanSingleCategory" Content="Clean Category" Style="{StaticResource DangerActionBtn}"/>
+                                </StackPanel>
+                            </Grid>
+
+                            <!-- Divider -->
+                            <Rectangle Grid.Row="1" Height="1" Fill="#27272A" Margin="0,8,0,8"/>
+
+                            <!-- 3-Column Explanations Grid: What Gets Deleted | Why It's Safe & Protected | Consequences & Rebuild -->
+                            <Grid Grid.Row="2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+
+                                <!-- Column 1: What Gets Deleted -->
+                                <Border Grid.Column="0" Background="#141416" BorderBrush="#27272A" BorderThickness="1" CornerRadius="4" Padding="10,8" Margin="0,0,6,0">
+                                    <DockPanel LastChildFill="True">
+                                        <TextBlock DockPanel.Dock="Top" Text="TARGET FILES &amp; DATA" FontSize="10" FontWeight="Bold" Foreground="#00B4D8" Margin="0,0,0,4"/>
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Background="Transparent">
+                                            <TextBlock x:Name="TxtCategoryWhatDeleted" Text="Select a category above to view specific target file types and paths." FontSize="11" Foreground="#D4D4D8" TextWrapping="Wrap"/>
+                                        </ScrollViewer>
+                                    </DockPanel>
+                                </Border>
+
+                                <!-- Column 2: Why It's Safe & Protected Data -->
+                                <Border Grid.Column="1" Background="#141416" BorderBrush="#27272A" BorderThickness="1" CornerRadius="4" Padding="10,8" Margin="3,0,3,0">
+                                    <DockPanel LastChildFill="True">
+                                        <TextBlock DockPanel.Dock="Top" Text="SAFETY &amp; PROTECTED DATA" FontSize="10" FontWeight="Bold" Foreground="#2EC4B6" Margin="0,0,0,4"/>
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Background="Transparent">
+                                            <TextBlock x:Name="TxtCategorySafetyExp" Text="Personal documents, passwords, credentials, and settings are never touched." FontSize="11" Foreground="#D4D4D8" TextWrapping="Wrap"/>
+                                        </ScrollViewer>
+                                    </DockPanel>
+                                </Border>
+
+                                <!-- Column 3: Post-Deletion Consequences -->
+                                <Border Grid.Column="2" Background="#141416" BorderBrush="#27272A" BorderThickness="1" CornerRadius="4" Padding="10,8" Margin="6,0,0,0">
+                                    <DockPanel LastChildFill="True">
+                                        <TextBlock DockPanel.Dock="Top" Text="POST-CLEANUP IMPACT" FontSize="10" FontWeight="Bold" Foreground="#FFB703" Margin="0,0,0,4"/>
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Background="Transparent">
+                                            <TextBlock x:Name="TxtCategoryConsequences" Text="Explains whether files auto-regenerate or require network reload." FontSize="11" Foreground="#D4D4D8" TextWrapping="Wrap"/>
+                                        </ScrollViewer>
+                                    </DockPanel>
+                                </Border>
+                            </Grid>
+                        </Grid>
+                    </Border>
                 </Grid>
             </TabItem>
 

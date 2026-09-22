@@ -91,6 +91,13 @@ $btnRunCleanup             = Find-Control "BtnRunCleanup"
 $gridCleanCategories       = Find-Control "GridCleanableCategories"
 $txtSelectedCatInfo        = Find-Control "TxtSelectedCategoryInfo"
 $txtSelectedCatDesc        = Find-Control "TxtSelectedCategoryDesc"
+$txtSelectedCatTitle       = Find-Control "TxtSelectedCategoryTitle"
+$badgeSafetyLevel          = Find-Control "BadgeSafetyLevel"
+$txtSelectedCatSafetyBadge = Find-Control "TxtSelectedCategorySafetyBadge"
+$txtSelectedCatSizeInfo    = Find-Control "TxtSelectedCategorySizeInfo"
+$txtCategoryWhatDeleted    = Find-Control "TxtCategoryWhatDeleted"
+$txtCategorySafetyExp      = Find-Control "TxtCategorySafetyExp"
+$txtCategoryConsequences   = Find-Control "TxtCategoryConsequences"
 $btnOpenCatInExplorer      = Find-Control "BtnOpenCategoryInExplorer"
 $btnInspectCatFiles        = Find-Control "BtnInspectCategoryFiles"
 $btnCleanSingleCategory    = Find-Control "BtnCleanSingleCategory"
@@ -244,8 +251,39 @@ $btnFilterBrowser.add_Click({ Apply-CleanupFilter "Browser" })
 $gridCleanCategories.add_SelectionChanged({
     $sel = $gridCleanCategories.SelectedItem
     if ($sel) {
-        $txtSelectedCatInfo.Text = "$($sel.DisplayName) - Size: $($sel.DisplaySize) ($($sel.FileCount))"
-        $txtSelectedCatDesc.Text = "$($sel.Description)"
+        if ($txtSelectedCatInfo) { $txtSelectedCatInfo.Text = "$($sel.DisplayName) - Size: $($sel.DisplaySize) ($($sel.FileCount))" }
+        if ($txtSelectedCatDesc) { $txtSelectedCatDesc.Text = "$($sel.Description)" }
+
+        if ($txtSelectedCatTitle) {
+            $txtSelectedCatTitle.Text = "$($sel.DisplayName)"
+        }
+        if ($txtSelectedCatSizeInfo) {
+            $bullet = [char]0x2022
+            $txtSelectedCatSizeInfo.Text = "$bullet Size on C: $($sel.DisplaySize) ($($sel.FileCount))"
+        }
+        if ($txtSelectedCatSafetyBadge) {
+            $badgeText = if ($sel.SafetyBadge) { $sel.SafetyBadge } else { $sel.SafetyLevel.ToUpper() }
+            $txtSelectedCatSafetyBadge.Text = $badgeText
+            if ($badgeSafetyLevel) {
+                if ($sel.SafetyLevel -eq 'Advanced') {
+                    $badgeSafetyLevel.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#E63946")
+                } elseif ($sel.SafetyLevel -eq 'Optional') {
+                    $badgeSafetyLevel.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#FFB703")
+                } else {
+                    $badgeSafetyLevel.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#2EC4B6")
+                }
+            }
+        }
+        if ($txtCategoryWhatDeleted) {
+            $txtCategoryWhatDeleted.Text = if ($sel.WhatGetsDeleted) { $sel.WhatGetsDeleted } else { $sel.Description }
+        }
+        if ($txtCategorySafetyExp) {
+            $txtCategorySafetyExp.Text = if ($sel.SafetyExplanation) { $sel.SafetyExplanation } else { "Safe to delete. User documents and credentials are untouched." }
+        }
+        if ($txtCategoryConsequences) {
+            $txtCategoryConsequences.Text = if ($sel.Consequences) { $sel.Consequences } else { "Files will be regenerated or re-downloaded as needed." }
+        }
+
         Update-SelectedCleanupBadge
     }
 })
@@ -294,9 +332,11 @@ $btnInspectCatFiles.add_Click({
 # 3. Action: Clean Selected Junk (Bulk with Live Streaming Progress)
 $btnRunCleanup.add_Click({
     $targetsToClean = @()
+    $totalCleanBytes = 0
     foreach ($item in $global:ScannedCleanupItems) {
         if ($item.IsSelected -eq $true -and $item.RawBytes -gt 0) {
             $targetsToClean += $item
+            $totalCleanBytes += [int64]$item.RawBytes
         }
     }
 
@@ -305,16 +345,31 @@ $btnRunCleanup.add_Click({
         return
     }
 
-    $totalBytes = ($targetsToClean | Measure-Object -Property RawBytes -Sum).Sum
-    $hasAdvanced = ($targetsToClean | Where-Object { $_.SafetyLevel -eq 'Advanced' -or $_.Id -in @('WinUpdateCache', 'DeliveryOpt') }).Count -gt 0
-    $advWarning = ""
-    if ($hasAdvanced) {
-        $advWarning = "`n`n[ADVANCED CLEANUP NOTICE]`nWindows Update Cache cleanup is selected. Diskman will verify that Windows Update and servicing components are idle before cleaning. Windows may need to re-download update files if updates are in progress."
+    $safeCount = @($targetsToClean | Where-Object { $_.SafetyLevel -eq 'Safe' }).Count
+    $optCount  = @($targetsToClean | Where-Object { $_.SafetyLevel -eq 'Optional' }).Count
+    $advCount  = @($targetsToClean | Where-Object { $_.SafetyLevel -eq 'Advanced' }).Count
+
+    $breakdown = "Selected Breakdown: $safeCount Safe, $optCount Optional, $advCount Advanced."
+    if ($advCount -gt 0) {
+        $breakdown += "`n`n[ADVANCED NOTICE] Windows Update and servicing caches are selected. Diskman will verify that servicing components (wuauserv, BITS, CBS) are completely idle before cleaning."
+    }
+    if ($optCount -gt 0) {
+        $breakdown += "`n`n[OPTIONAL NOTICE] Developer or offline media caches are selected. Missing packages or offline tracks may be re-downloaded over the network on demand."
     }
 
+    $bullet = [char]0x2022
+    $confirmMsg = "Proceed with cleaning $(Format-Bytes -Bytes $totalCleanBytes) across $($targetsToClean.Count) selected C: drive categories?`n`n" +
+                  "$breakdown`n`n" +
+                  "Diskman Multi-Layer Safety Guarantee:`n" +
+                  "$bullet Personal documents, photos, and desktop files are NEVER touched.`n" +
+                  "$bullet Browser passwords, saved logins, cookies, and bookmarks are strictly protected.`n" +
+                  "$bullet Game installations, save games, and user profiles are preserved.`n" +
+                  "$bullet Real-time deletion activity will stream live below.`n`n" +
+                  "Execute cleanup pipeline?"
+
     $confirm = [System.Windows.MessageBox]::Show(
-        "Proceed with cleaning $(Format-Bytes -Bytes $totalBytes) across $($targetsToClean.Count) selected C: drive junk categories?$advWarning`n`nDiskman will safely remove selected cache files and purge trash.`n`nReal-time deletion progress will stream live to the terminal window and activity log.",
-        "Confirm C: Drive Cleanup",
+        $confirmMsg,
+        "Confirm C: Drive Cleanup Pipeline",
         [System.Windows.MessageBoxButton]::YesNo,
         [System.Windows.MessageBoxImage]::Warning
     )
@@ -322,9 +377,9 @@ $btnRunCleanup.add_Click({
     if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
         Log-Console "=========================================================="
         Log-Console "EXECUTING C: DRIVE CLEANUP PIPELINE"
-        Log-Console "Total Selected Space: $(Format-Bytes -Bytes $totalBytes) ($($targetsToClean.Count) categories)"
+        Log-Console "Total Selected Space: $(Format-Bytes -Bytes $totalCleanBytes) ($($targetsToClean.Count) categories: $safeCount Safe, $optCount Optional, $advCount Advanced)"
         
-        $hasAdminTargets = ($targetsToClean | Where-Object { $_.RequiresAdmin -eq $true }).Count -gt 0
+        $hasAdminTargets = @($targetsToClean | Where-Object { $_.RequiresAdmin -eq $true }).Count -gt 0
         if ($hasAdminTargets -and -not $isAdmin) {
             Log-Console "Notice: Selected system items require Administrator rights. Run via run.bat (Admin) if locked items are skipped." "WARN"
         }
@@ -368,14 +423,23 @@ $btnCleanSingleCategory.add_Click({
         return
     }
 
-    $advNotice = ""
-    if ($sel.SafetyLevel -eq 'Advanced' -or $sel.Id -in @('WinUpdateCache', 'DeliveryOpt')) {
-        $advNotice = "`n`n[ADVANCED CLEANUP NOTICE]`nThis removes downloaded Windows Update cache files. Windows may need to download them again. Do not use this while Windows is installing updates or waiting for a restart."
-    }
+    $safetyText = if ($sel.SafetyExplanation) { $sel.SafetyExplanation } else { "Safe to delete. User files and credentials are untouched." }
+    $deletedText = if ($sel.WhatGetsDeleted) { $sel.WhatGetsDeleted } else { $sel.Description }
+    $consequencesText = if ($sel.Consequences) { $sel.Consequences } else { "Files auto-regenerate on next launch." }
+    $badgeText = if ($sel.SafetyBadge) { $sel.SafetyBadge } else { $sel.SafetyLevel.ToUpper() }
+
+    $dialogMsg = "CLEANUP VERIFICATION & IMPACT DETAILS`n`n" +
+                 "Category: $($sel.CategoryName) [$badgeText]`n" +
+                 "Size on C: $($sel.DisplaySize) ($($sel.FileCount))`n" +
+                 "Path: $($sel.Target)`n`n" +
+                 "[WHAT GETS DELETED]`n$deletedText`n`n" +
+                 "[SAFETY & PROTECTED DATA]`n$safetyText`n`n" +
+                 "[CONSEQUENCES & REBUILD]`n$consequencesText`n`n" +
+                 "Proceed with deleting these files?"
 
     $confirm = [System.Windows.MessageBox]::Show(
-        "Clean all files in '$($sel.CategoryName)' ($($sel.DisplaySize))?$advNotice`n`nLocation: $($sel.Target)",
-        "Confirm Category Cleanup",
+        $dialogMsg,
+        "Confirm Cleanup - $($sel.CategoryName)",
         [System.Windows.MessageBoxButton]::YesNo,
         [System.Windows.MessageBoxImage]::Question
     )
@@ -629,8 +693,19 @@ if ($isAdmin) {
 Log-Console "=========================================================="
 
 Update-CDriveMetricsDisplay
-Start-ScanCJunk
-Load-Directory "C:\"
+
+# Instant-Launch Hook: Render the GUI window immediately (< 1s), then initiate background scan
+$window.add_ContentRendered({
+    Start-ScanCJunk
+})
+
+# Defer Directory Explorer loading until the tab is switched to
+$mainTabControl.add_SelectionChanged({
+    if ($mainTabControl.SelectedIndex -eq 3 -and $null -eq $global:CurrentExplorerPath) {
+        Load-Directory "C:\"
+    }
+})
 
 # Show Window
 $window.ShowDialog() | Out-Null
+

@@ -888,6 +888,10 @@ function Get-FolderSizeFast {
                     } catch {}
                 }
                 foreach ($sub in $dirInfo.EnumerateDirectories()) {
+                    # Fast in-memory attribute check for reparse point (junction/symlink)
+                    if ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                        continue
+                    }
                     # Skip symlinks, junctions, and unverified reparse points to avoid external traversal
                     $reparseCheck = Test-ReparsePoint -Path $sub.FullName
                     if (-not $reparseCheck.Success -or $reparseCheck.IsReparsePoint) {
@@ -916,456 +920,581 @@ function Get-CleanableTargets {
     $userProfile  = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
 
     $targets = @(
-        # ==========================================
-        # 1. WINDOWS & SYSTEM TARGETS
-        # ==========================================
         @{
-            Id          = 'UserTemp'
-            Group       = 'Windows & System'
-            Category    = 'Windows User Temp'
-            Icon        = '[TEMP]'
-            Path        = $userTempPath
-            Description = 'Temporary application and cache files created by running user programs'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'UserTemp'
+            Group             = 'Windows & System'
+            Category          = 'Windows User Temp'
+            Icon              = '[TEMP]'
+            Path              = $userTempPath
+            Description       = 'Temporary application and cache files created by running user programs'
+            WhatGetsDeleted   = 'Temporary session files, scratch buffers, installer extractors, and ephemeral .tmp files in %LOCALAPPDATA%\Temp.'
+            SafetyExplanation = 'Safe: Temporary scratch space used by running programs. Files actively locked by open processes are automatically skipped. User documents, personal files, and program installations are never stored here.'
+            Consequences      = 'None. Running applications will automatically create fresh temporary files during future sessions as needed.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'SystemTemp'
-            Group       = 'Windows & System'
-            Category    = 'Windows System Temp'
-            Icon        = '[SYS]'
-            Path        = (Join-Path $sysRoot 'Temp')
-            Description = 'Operating system temporary cache files'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $true
+            Id                = 'SystemTemp'
+            Group             = 'Windows & System'
+            Category          = 'Windows System Temp'
+            Icon              = '[SYS]'
+            Path              = (Join-Path $sysRoot 'Temp')
+            Description       = 'Operating system temporary cache files and service leftovers'
+            WhatGetsDeleted   = 'Operating system service scratch files, driver extraction folders, and background installer leftovers in C:\Windows\Temp.'
+            SafetyExplanation = 'Safe (Admin): Temporary files discarded by completed Windows updates and service installations. Active Windows kernel/service files are locked and skipped.'
+            Consequences      = 'None. System services and installers generate new temporary files when required.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $true
         },
         @{
-            Id          = 'WinUpdateCache'
-            Group       = 'Windows & System'
-            Category    = 'Windows Update Cache'
-            Icon        = '[UPDATE]'
-            Path        = (Join-Path $sysRoot 'SoftwareDistribution\Download')
-            Description = 'Advanced cleanup â€” Downloaded Windows Update packages. Windows may need to re-download update files if updates are in progress.'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Advanced'
-            Recommended = $false
-            RequiresAdmin = $true
+            Id                = 'WinUpdateCache'
+            Group             = 'Windows & System'
+            Category          = 'Windows Update Cache'
+            Icon              = '[UPDATE]'
+            Path              = (Join-Path $sysRoot 'SoftwareDistribution\Download')
+            Description       = 'Advanced cleanup - Downloaded Windows Update packages and staging payloads'
+            WhatGetsDeleted   = 'Downloaded Windows Update payload .cab archives, patch packages, and cumulative update staging files in C:\Windows\SoftwareDistribution\Download.'
+            SafetyExplanation = 'Advanced (Admin): Only safe when Windows Update is idle. Diskman actively confirms Windows Update, BITS, and CBS are idle before proceeding. Parent metadata (DataStore) is strictly protected.'
+            Consequences      = 'If an update was staged and pending restart, Windows Update will re-download the installation files from Microsoft servers during the next scan.'
+            SafetyBadge       = 'ADVANCED'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Advanced'
+            Recommended       = $false
+            RequiresAdmin     = $true
         },
         @{
-            Id          = 'DeliveryOpt'
-            Group       = 'Windows & System'
-            Category    = 'Delivery Optimization Files'
-            Icon        = '[OPT]'
-            Path        = (Join-Path $sysRoot 'SoftwareDistribution\DeliveryOptimization')
-            Description = 'Advanced cleanup â€” Cached Windows peer-to-peer delivery optimization chunks.'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Advanced'
-            Recommended = $false
-            RequiresAdmin = $true
+            Id                = 'DeliveryOpt'
+            Group             = 'Windows & System'
+            Category          = 'Delivery Optimization Files'
+            Icon              = '[OPT]'
+            Path              = (Join-Path $sysRoot 'SoftwareDistribution\DeliveryOptimization')
+            Description       = 'Advanced cleanup - Cached Windows peer-to-peer delivery optimization chunks'
+            WhatGetsDeleted   = 'Cached peer-to-peer Windows update chunk files and local network distribution bits in C:\Windows\SoftwareDistribution\DeliveryOptimization.'
+            SafetyExplanation = 'Advanced (Admin): Cached chunks used solely to seed updates to other computers on your local network. Core OS files and update registries are not touched.'
+            Consequences      = 'Future updates will download directly from Microsoft cloud CDNs rather than peer-to-peer cache.'
+            SafetyBadge       = 'ADVANCED'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Advanced'
+            Recommended       = $false
+            RequiresAdmin     = $true
         },
         @{
-            Id          = 'CrashDumps'
-            Group       = 'Windows & System'
-            Category    = 'Crash Dumps & Minidumps'
-            Icon        = '[DUMP]'
-            Path        = (Join-Path $localAppData 'CrashDumps')
-            Description = 'Application crash dumps (.dmp files) from previously crashed applications'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'CrashDumps'
+            Group             = 'Windows & System'
+            Category          = 'Crash Dumps & Minidumps'
+            Icon              = '[DUMP]'
+            Path              = (Join-Path $localAppData 'CrashDumps')
+            Description       = 'Application crash dumps (.dmp files) from previously crashed applications'
+            WhatGetsDeleted   = 'Windows Error Reporting post-mortem memory dumps (.dmp) in %LOCALAPPDATA%\CrashDumps.'
+            SafetyExplanation = 'Safe: Diagnostic crash memory snapshots captured after past application crashes. They are solely for developer debugging and have zero operational value.'
+            Consequences      = 'None. Frees storage. A new dump will only be generated if a program crashes in the future.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'WERLogs'
-            Group       = 'Windows & System'
-            Category    = 'Windows Error Reports (WER)'
-            Icon        = '[LOG]'
-            Path        = (Join-Path $localAppData 'Microsoft\Windows\WER')
-            Description = 'Queued and archived Windows error reporting telemetry data'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'WERLogs'
+            Group             = 'Windows & System'
+            Category          = 'Windows Error Reports (WER)'
+            Icon              = '[LOG]'
+            Path              = (Join-Path $localAppData 'Microsoft\Windows\WER')
+            Description       = 'Queued and archived Windows error reporting telemetry diagnostic data'
+            WhatGetsDeleted   = 'Queued and archived Windows Error Reporting diagnostic reports in %LOCALAPPDATA%\Microsoft\Windows\WER.'
+            SafetyExplanation = 'Safe: Telemetry and diagnostic queues waiting to be sent to Microsoft servers. Purging them removes accumulated telemetry without impacting any applications.'
+            Consequences      = 'None. Diagnostic error queues are cleared.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'CbsLogs'
-            Group       = 'Windows & System'
-            Category    = 'Windows CBS & Component Logs'
-            Icon        = '[LOG]'
-            Path        = (Join-Path $sysRoot 'Logs\CBS')
-            Description = 'Historical Windows Component-Based Servicing installation log files'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $true
+            Id                = 'CbsLogs'
+            Group             = 'Windows & System'
+            Category          = 'Windows CBS & Component Logs'
+            Icon              = '[LOG]'
+            Path              = (Join-Path $sysRoot 'Logs\CBS')
+            Description       = 'Historical Windows Component-Based Servicing installation log files'
+            WhatGetsDeleted   = 'Historical Component-Based Servicing installation logs (CBS.log, CbsPersist_*.log/cab) in C:\Windows\Logs\CBS.'
+            SafetyExplanation = 'Safe (Admin): Diagnostic text records from past Windows servicing and SFC commands. Active logs in use are skipped. Servicing state files and package manifests are strictly protected.'
+            Consequences      = 'Historical installation text history is wiped; Windows CBS initiates a clean, fresh log upon the next servicing event.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $true
         },
         @{
-            Id          = 'DismLogs'
-            Group       = 'Windows & System'
-            Category    = 'DISM & Servicing Logs'
-            Icon        = '[LOG]'
-            Path        = (Join-Path $sysRoot 'Logs\DISM')
-            Description = 'Deployment Image Servicing and Management log files'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $true
-        },
-
-        # ==========================================
-        # 2. GAMING & GPU SHADER CACHES
-        # ==========================================
-        @{
-            Id          = 'NvidiaDxCache'
-            Group       = 'Gaming & GPU'
-            Category    = 'NVIDIA DirectX Shader Cache (DXCache)'
-            Icon        = '[GPU]'
-            Path        = (Join-Path $localAppData 'NVIDIA\DXCache')
-            Description = 'Compiled DirectX game shader cache. Rebuilt dynamically by NVIDIA GPU driver.'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'DismLogs'
+            Group             = 'Windows & System'
+            Category          = 'DISM & Servicing Logs'
+            Icon              = '[LOG]'
+            Path              = (Join-Path $sysRoot 'Logs\DISM')
+            Description       = 'Deployment Image Servicing and Management log files'
+            WhatGetsDeleted   = 'Diagnostic log files (dism.log) generated by Deployment Image Servicing and Management in C:\Windows\Logs\DISM.'
+            SafetyExplanation = 'Safe (Admin): Historical servicing text logs from DISM operations.'
+            Consequences      = 'None. Fresh logs are created when DISM is executed in the future.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $true
         },
         @{
-            Id          = 'NvidiaGlCache'
-            Group       = 'Gaming & GPU'
-            Category    = 'NVIDIA OpenGL/Vulkan Cache (GLCache)'
-            Icon        = '[GPU]'
-            Path        = (Join-Path $localAppData 'NVIDIA\GLCache')
-            Description = 'Compiled OpenGL and Vulkan game shader cache from NVIDIA GPU'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'NvidiaDxCache'
+            Group             = 'Gaming & GPU'
+            Category          = 'NVIDIA DirectX Shader Cache (DXCache)'
+            Icon              = '[GPU]'
+            Path              = (Join-Path $localAppData 'NVIDIA\DXCache')
+            Description       = 'Compiled DirectX game shader cache. Rebuilt dynamically by NVIDIA GPU driver.'
+            WhatGetsDeleted   = 'Precompiled DirectX GPU shader pipeline binaries (.bin, .toc) in %LOCALAPPDATA%\NVIDIA\DXCache.'
+            SafetyExplanation = 'Safe: Machine-code shaders compiled by the NVIDIA graphics driver. Clearing corrupt shaders resolves graphics glitches and game crashes. Game saves, profiles, and graphics settings are untouched.'
+            Consequences      = 'Games may experience a brief one-time loading delay or minor stutter upon first launch while the GPU driver recompiles shaders.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'DirectXShaderCache'
-            Group       = 'Gaming & GPU'
-            Category    = 'Windows DirectX Shader Cache (D3DSCache)'
-            Icon        = '[GPU]'
-            Path        = (Join-Path $localAppData 'D3DSCache')
-            Description = 'Global Windows DirectX shader cache shared across game titles'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'NvidiaGlCache'
+            Group             = 'Gaming & GPU'
+            Category          = 'NVIDIA OpenGL/Vulkan Cache (GLCache)'
+            Icon              = '[GPU]'
+            Path              = (Join-Path $localAppData 'NVIDIA\GLCache')
+            Description       = 'Compiled OpenGL and Vulkan game shader cache from NVIDIA GPU'
+            WhatGetsDeleted   = 'Precompiled OpenGL and Vulkan GPU shader binaries in %LOCALAPPDATA%\NVIDIA\GLCache.'
+            SafetyExplanation = 'Safe: Compiled graphics shaders. Game saves, user profiles, and driver configurations are never touched.'
+            Consequences      = 'Rebuilt automatically by the NVIDIA graphics driver during gameplay.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'AmdDxCache'
-            Group       = 'Gaming & GPU'
-            Category    = 'AMD Radeon Shader Cache'
-            Icon        = '[GPU]'
-            Path        = (Join-Path $localAppData 'AMD\DxCache')
-            Description = 'Compiled game shader cache for AMD Radeon graphics cards'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'DirectXShaderCache'
+            Group             = 'Gaming & GPU'
+            Category          = 'Windows DirectX Shader Cache (D3DSCache)'
+            Icon              = '[GPU]'
+            Path              = (Join-Path $localAppData 'D3DSCache')
+            Description       = 'Global Windows DirectX shader cache shared across game titles'
+            WhatGetsDeleted   = 'Global Windows Direct3D shader cache entries in %LOCALAPPDATA%\D3DSCache.'
+            SafetyExplanation = 'Safe: Windows standard DirectX shader cache (equivalent to Windows Disk Cleanup cleanmgr.exe).'
+            Consequences      = 'DirectX shaders will be recompiled dynamically by graphics drivers as 3D applications run.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'IntelShaderCache'
-            Group       = 'Gaming & GPU'
-            Category    = 'Intel Graphics Shader Cache'
-            Icon        = '[GPU]'
-            Path        = (Join-Path $localAppData 'Intel\ShaderCache')
-            Description = 'Compiled game shader cache for Intel Arc and Iris graphics'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'AmdDxCache'
+            Group             = 'Gaming & GPU'
+            Category          = 'AMD Radeon Shader Cache'
+            Icon              = '[GPU]'
+            Path              = (Join-Path $localAppData 'AMD\DxCache')
+            Description       = 'Compiled game shader cache for AMD Radeon graphics cards'
+            WhatGetsDeleted   = 'Compiled DirectX graphics shaders for AMD Radeon GPUs in %LOCALAPPDATA%\AMD\DxCache.'
+            SafetyExplanation = 'Safe: Machine-code shaders compiled by AMD Adrenalin. Game saves and driver settings are completely preserved.'
+            Consequences      = 'Brief shader compilation upon first launch of 3D games.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'SteamWebCache'
-            Group       = 'Gaming & GPU'
-            Category    = 'Steam Web & HTTP Cache'
-            Icon        = '[STEAM]'
-            Path        = (Join-Path $localAppData 'Steam\htmlcache')
-            Description = 'Cached store web assets, media thumbnails, and browser cache in Steam'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'IntelShaderCache'
+            Group             = 'Gaming & GPU'
+            Category          = 'Intel Graphics Shader Cache'
+            Icon              = '[GPU]'
+            Path              = (Join-Path $localAppData 'Intel\ShaderCache')
+            Description       = 'Compiled game shader cache for Intel Arc and Iris graphics'
+            WhatGetsDeleted   = 'Precompiled shader binaries for Intel Arc and integrated GPUs in %LOCALAPPDATA%\Intel\ShaderCache.'
+            SafetyExplanation = 'Safe: Rebuilt dynamically by Intel graphics drivers. User settings and profiles are untouched.'
+            Consequences      = 'Brief one-time shader recompilation on initial game launch.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'EpicGamesCache'
-            Group       = 'Gaming & GPU'
-            Category    = 'Epic Games Launcher Cache'
-            Icon        = '[EPIC]'
-            Path        = (Join-Path $localAppData 'EpicGamesLauncher\Saved\webcache')
-            Description = 'Cached store assets and web interface data in Epic Games Launcher'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'SteamWebCache'
+            Group             = 'Gaming & GPU'
+            Category          = 'Steam Web & HTTP Cache'
+            Icon              = '[STEAM]'
+            Path              = (Join-Path $localAppData 'Steam\htmlcache')
+            Description       = 'Cached store web assets, media thumbnails, and browser cache in Steam'
+            WhatGetsDeleted   = 'Embedded Chromium browser cache (store thumbnails, community images, web CSS) in %LOCALAPPDATA%\Steam\htmlcache.'
+            SafetyExplanation = 'Safe: Only store and community browser graphics. Game files (steamapps), save games, and user credentials (config/) are strictly protected and never touched.'
+            Consequences      = 'Steam store and community pages will re-fetch images and stylesheet assets from Steam servers upon browsing.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'EaAppCache'
-            Group       = 'Gaming & GPU'
-            Category    = 'EA Desktop / Origin Cache'
-            Icon        = '[EA]'
-            Path        = (Join-Path $localAppData 'Electronic Arts\EA Desktop\Cache')
-            Description = 'Cached game store artwork and web data in EA Desktop'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'EpicGamesCache'
+            Group             = 'Gaming & GPU'
+            Category          = 'Epic Games Launcher Cache'
+            Icon              = '[EPIC]'
+            Path              = (Join-Path $localAppData 'EpicGamesLauncher\Saved\webcache')
+            Description       = 'Cached store assets and web interface data in Epic Games Launcher'
+            WhatGetsDeleted   = 'Storefront web assets, promotion graphics, and thumbnail caches in %LOCALAPPDATA%\EpicGamesLauncher\Saved\webcache.'
+            SafetyExplanation = 'Safe: Only web interface cache. Installed game files, cloud saves, and login authentication tokens are completely untouched.'
+            Consequences      = 'Store banners and thumbnails will re-download from Epic Games CDN when the launcher is opened.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'UbisoftCache'
-            Group       = 'Gaming & GPU'
-            Category    = 'Ubisoft Connect Cache'
-            Icon        = '[UBI]'
-            Path        = (Join-Path $localAppData 'Ubisoft Game Launcher\cache')
-            Description = 'Cached client assets and avatars in Ubisoft Connect Launcher'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'EaAppCache'
+            Group             = 'Gaming & GPU'
+            Category          = 'EA Desktop / Origin Cache'
+            Icon              = '[EA]'
+            Path              = (Join-Path $localAppData 'Electronic Arts\EA Desktop\Cache')
+            Description       = 'Cached game store artwork and web data in EA Desktop'
+            WhatGetsDeleted   = 'Storefront graphics, web views, and interface cache in %LOCALAPPDATA%\Electronic Arts\EA Desktop\Cache.'
+            SafetyExplanation = 'Safe: Launcher interface assets only. Installed games and local game saves remain completely untouched.'
+            Consequences      = 'EA Desktop will re-cache store images upon launch.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'BattlenetCache'
-            Group       = 'Gaming & GPU'
-            Category    = 'Battle.net / Blizzard Agent Cache'
-            Icon        = '[BNET]'
-            Path        = (Join-Path $progData 'Battle.net\Agent\data\cache')
-            Description = 'Battle.net Agent patcher and installer cached metadata'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $true
+            Id                = 'UbisoftCache'
+            Group             = 'Gaming & GPU'
+            Category          = 'Ubisoft Connect Cache'
+            Icon              = '[UBI]'
+            Path              = (Join-Path $localAppData 'Ubisoft Game Launcher\cache')
+            Description       = 'Cached client assets and avatars in Ubisoft Connect Launcher'
+            WhatGetsDeleted   = 'Launcher avatars, news banners, and web UI cache in %LOCALAPPDATA%\Ubisoft Game Launcher\cache.'
+            SafetyExplanation = 'Safe: Only UI cache. Installed games, save files, and login tokens are safely stored in separate folders and untouched.'
+            Consequences      = 'Launcher will re-download store and avatar graphics when browsed.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'RiotClientLogs'
-            Group       = 'Gaming & GPU'
-            Category    = 'Riot Games Client Logs'
-            Icon        = '[RIOT]'
-            Path        = (Join-Path $localAppData 'Riot Games\Riot Client\Logs')
-            Description = 'Historical log dumps from Riot Client (League of Legends, Valorant)'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'BattlenetCache'
+            Group             = 'Gaming & GPU'
+            Category          = 'Battle.net / Blizzard Agent Cache'
+            Icon              = '[BNET]'
+            Path              = (Join-Path $progData 'Battle.net\Agent\data\cache')
+            Description       = 'Battle.net Agent patcher and installer cached metadata'
+            WhatGetsDeleted   = 'Blizzard Agent patcher and installer cached metadata in %PROGRAMDATA%\Battle.net\Agent\data\cache.'
+            SafetyExplanation = 'Safe (Admin): Ephemeral Blizzard agent patcher data. Game installations, save data, and user logins are preserved.'
+            Consequences      = 'Battle.net Agent re-checks patch status from Blizzard servers when games are launched or updated.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $true
         },
         @{
-            Id          = 'UnrealEngineDdc'
-            Group       = 'Gaming & GPU'
-            Category    = 'Unreal Engine Derived Data Cache (DDC)'
-            Icon        = '[UE]'
-            Path        = (Join-Path $localAppData 'UnrealEngine\Common\DerivedDataCache')
-            Description = 'Derived data cache for Unreal Engine 4 and 5 game compilations'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $false
-            RequiresAdmin = $false
+            Id                = 'RiotClientLogs'
+            Group             = 'Gaming & GPU'
+            Category          = 'Riot Games Client Logs'
+            Icon              = '[RIOT]'
+            Path              = (Join-Path $localAppData 'Riot Games\Riot Client\Logs')
+            Description       = 'Historical log dumps from Riot Client (League of Legends, Valorant)'
+            WhatGetsDeleted   = 'Historical session text logs and crash traces in %LOCALAPPDATA%\Riot Games\Riot Client\Logs.'
+            SafetyExplanation = 'Safe: Diagnostic text logs only. Vanguard anti-cheat, game files, and credentials are untouched.'
+            Consequences      = 'None. Fresh session logs will begin on the next match.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'UnityCache'
-            Group       = 'Gaming & GPU'
-            Category    = 'Unity Editor & Asset Cache'
-            Icon        = '[UNITY]'
-            Path        = (Join-Path $localAppData 'Unity\cache')
-            Description = 'Downloaded package and asset store caches for Unity games'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $false
-            RequiresAdmin = $false
-        },
-
-        # ==========================================
-        # 3. DEVELOPER CACHES
-        # ==========================================
-        @{
-            Id          = 'PipCache'
-            Group       = 'Developer Caches'
-            Category    = 'Python Pip Wheel Cache'
-            Icon        = '[PIP]'
-            Path        = (Join-Path $localAppData 'pip\cache')
-            Description = 'Cached Python wheel binaries and download archives'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'UnrealEngineDdc'
+            Group             = 'Gaming & GPU'
+            Category          = 'Unreal Engine Derived Data Cache (DDC)'
+            Icon              = '[UE]'
+            Path              = (Join-Path $localAppData 'UnrealEngine\Common\DerivedDataCache')
+            Description       = 'Derived data cache for Unreal Engine 4 and 5 game compilations'
+            WhatGetsDeleted   = 'Derived Data Cache (cooked textures, audio, and compiled shaders) in %LOCALAPPDATA%\UnrealEngine\Common\DerivedDataCache.'
+            SafetyExplanation = 'Optional: Safe to delete to free large disk space; project files and source code are completely untouched. However, recompilation requires significant CPU time.'
+            Consequences      = 'Unreal Engine projects will take longer to load on the first open while the engine recompiles shaders and recooks assets.'
+            SafetyBadge       = 'OPTIONAL'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Optional'
+            Recommended       = $false
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'NpmCache'
-            Group       = 'Developer Caches'
-            Category    = 'Node.js NPM Cache'
-            Icon        = '[NPM]'
-            Path        = (Join-Path $appData 'npm-cache')
-            Description = 'Global Node Package Manager download cache'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'UnityCache'
+            Group             = 'Gaming & GPU'
+            Category          = 'Unity Editor & Asset Cache'
+            Icon              = '[UNITY]'
+            Path              = (Join-Path $localAppData 'Unity\cache')
+            Description       = 'Downloaded package and asset store caches for Unity games'
+            WhatGetsDeleted   = 'Downloaded Unity Asset Store packages and package manager tarballs in %LOCALAPPDATA%\Unity\cache.'
+            SafetyExplanation = 'Optional: Safe duplicate archive of downloaded packages. Project source files are never touched.'
+            Consequences      = 'Packages will re-download from the Unity Package Manager registry when opened in a project, requiring an active internet connection.'
+            SafetyBadge       = 'OPTIONAL'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Optional'
+            Recommended       = $false
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'YarnCache'
-            Group       = 'Developer Caches'
-            Category    = 'Yarn Package Cache'
-            Icon        = '[YARN]'
-            Path        = (Join-Path $localAppData 'Yarn\Cache')
-            Description = 'Yarn package manager cached archives'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'PipCache'
+            Group             = 'Developer Caches'
+            Category          = 'Python Pip Wheel Cache'
+            Icon              = '[PIP]'
+            Path              = (Join-Path $localAppData 'pip\cache')
+            Description       = 'Cached Python wheel binaries and download archives'
+            WhatGetsDeleted   = 'Cached .whl binaries and source download tarballs in %LOCALAPPDATA%\pip\cache.'
+            SafetyExplanation = 'Safe: Download copies of Python packages. Installed Python environments, virtual environments (venv), and scripts are NOT touched.'
+            Consequences      = 'Subsequent pip install commands will fetch packages from PyPI instead of the local cache.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'NugetCache'
-            Group       = 'Developer Caches'
-            Category    = 'NuGet / .NET Cache'
-            Icon        = '[NUGET]'
-            Path        = (Join-Path $userProfile '.nuget\packages')
-            Description = 'Local cache of downloaded NuGet packages'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Optional'
-            Recommended = $false
-            RequiresAdmin = $false
+            Id                = 'NpmCache'
+            Group             = 'Developer Caches'
+            Category          = 'Node.js NPM Cache'
+            Icon              = '[NPM]'
+            Path              = (Join-Path $appData 'npm-cache')
+            Description       = 'Global Node Package Manager download cache'
+            WhatGetsDeleted   = 'Global tarball archives cached by npm in %APPDATA%\npm-cache.'
+            SafetyExplanation = 'Safe: Duplicate package download archives. Project node_modules, package.json, and global binaries are untouched.'
+            Consequences      = 'Future npm install for previously cached packages will re-download tarballs from the npm registry.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'GradleCache'
-            Group       = 'Developer Caches'
-            Category    = 'Gradle Build Cache'
-            Icon        = '[GRADLE]'
-            Path        = (Join-Path $userProfile '.gradle\caches')
-            Description = 'Downloaded jar artifacts and distribution zip caches in Gradle'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Optional'
-            Recommended = $false
-            RequiresAdmin = $false
+            Id                = 'YarnCache'
+            Group             = 'Developer Caches'
+            Category          = 'Yarn Package Cache'
+            Icon              = '[YARN]'
+            Path              = (Join-Path $localAppData 'Yarn\Cache')
+            Description       = 'Yarn package manager cached archives'
+            WhatGetsDeleted   = 'Cached package archives in %LOCALAPPDATA%\Yarn\Cache.'
+            SafetyExplanation = 'Safe: Duplicate package download archives. Project files, lockfiles, and application source code are untouched.'
+            Consequences      = 'Packages will be re-downloaded from the registry if installed in new projects.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'CargoCache'
-            Group       = 'Developer Caches'
-            Category    = 'Rust Cargo Registry Cache'
-            Icon        = '[CARGO]'
-            Path        = (Join-Path $userProfile '.cargo\registry\cache')
-            Description = 'Cached Rust crate archive files'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Optional'
-            Recommended = $false
-            RequiresAdmin = $false
-        },
-
-        # ==========================================
-        # 4. BROWSER & MEDIA APPLICATION CACHES
-        # ==========================================
-        @{
-            Id          = 'ChromeCache'
-            Group       = 'Browser & App Caches'
-            Category    = 'Google Chrome Web Cache'
-            Icon        = '[CHROME]'
-            Path        = (Join-Path $localAppData 'Google\Chrome\User Data\Default\Cache')
-            Description = 'Cached web pages, images, and script assets in Google Chrome'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'NugetCache'
+            Group             = 'Developer Caches'
+            Category          = 'NuGet / .NET Cache'
+            Icon              = '[NUGET]'
+            Path              = (Join-Path $userProfile '.nuget\packages')
+            Description       = 'Local cache of downloaded NuGet packages'
+            WhatGetsDeleted   = 'Global cache of unpacked NuGet packages in %USERPROFILE%\.nuget\packages.'
+            SafetyExplanation = 'Optional: Safe to delete to free massive space. Project source code and solution files are untouched.'
+            Consequences      = 'The next dotnet build or Visual Studio build will automatically run dotnet restore to re-download required packages from nuget.org.'
+            SafetyBadge       = 'OPTIONAL'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Optional'
+            Recommended       = $false
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'EdgeCache'
-            Group       = 'Browser & App Caches'
-            Category    = 'Microsoft Edge Web Cache'
-            Icon        = '[EDGE]'
-            Path        = (Join-Path $localAppData 'Microsoft\Edge\User Data\Default\Cache')
-            Description = 'Cached media and webpage assets in Microsoft Edge'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'GradleCache'
+            Group             = 'Developer Caches'
+            Category          = 'Gradle Build Cache'
+            Icon              = '[GRADLE]'
+            Path              = (Join-Path $userProfile '.gradle\caches')
+            Description       = 'Downloaded jar artifacts and distribution zip caches in Gradle'
+            WhatGetsDeleted   = 'Downloaded dependency JARs, wrapper distributions, and build outputs in %USERPROFILE%\.gradle\caches.'
+            SafetyExplanation = 'Optional: Often consumes 10-50 GB. Safe to purge; project source code is completely untouched.'
+            Consequences      = 'The next ./gradlew build will re-download project dependencies and plugins from Maven Central/Google repository.'
+            SafetyBadge       = 'OPTIONAL'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Optional'
+            Recommended       = $false
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'BraveCache'
-            Group       = 'Browser & App Caches'
-            Category    = 'Brave Browser Cache'
-            Icon        = '[BRAVE]'
-            Path        = (Join-Path $localAppData 'BraveSoftware\Brave-Browser\User Data\Default\Cache')
-            Description = 'Cached web data in Brave Browser'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $false
-            RequiresAdmin = $false
+            Id                = 'CargoCache'
+            Group             = 'Developer Caches'
+            Category          = 'Rust Cargo Registry Cache'
+            Icon              = '[CARGO]'
+            Path              = (Join-Path $userProfile '.cargo\registry\cache')
+            Description       = 'Cached Rust crate archive files'
+            WhatGetsDeleted   = 'Cached .crate download archives in %USERPROFILE%\.cargo\registry\cache.'
+            SafetyExplanation = 'Optional: Download archives. Cargo source checkouts and compiled binaries in target/ are untouched.'
+            Consequences      = 'Cargo will re-download .crate files from crates.io on the next build.'
+            SafetyBadge       = 'OPTIONAL'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Optional'
+            Recommended       = $false
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'DiscordCache'
-            Group       = 'Browser & App Caches'
-            Category    = 'Discord App Media Cache'
-            Icon        = '[DISCORD]'
-            Path        = (Join-Path $appData 'discord\Cache')
-            Description = 'Cached Discord media, avatars, and attachments'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'ChromeCache'
+            Group             = 'Browser & App Caches'
+            Category          = 'Google Chrome Web Cache'
+            Icon              = '[CHROME]'
+            Path              = (Join-Path $localAppData 'Google\Chrome\User Data\Default\Cache')
+            Description       = 'Cached web pages, images, and script assets in Google Chrome'
+            WhatGetsDeleted   = 'Cached website images, scripts, stylesheets, and video buffers in %LOCALAPPDATA%\Google\Chrome\User Data\Default\Cache.'
+            SafetyExplanation = 'Safe: Web media only. PASSWORDS, LOGINS, BROWSING HISTORY, BOOKMARKS, COOKIES, AND EXTENSIONS ARE STRICTLY PROTECTED AND NEVER TOUCHED.'
+            Consequences      = 'Websites will re-download images and stylesheet assets on the first visit, which may slightly increase initial page load time.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'SpotifyCache'
-            Group       = 'Browser & App Caches'
-            Category    = 'Spotify Track Storage'
-            Icon        = '[SPOTIFY]'
-            Path        = (Join-Path $localAppData 'Spotify\Storage')
-            Description = 'Locally cached music streams and playback buffers in Spotify'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Optional'
-            Recommended = $false
-            RequiresAdmin = $false
+            Id                = 'EdgeCache'
+            Group             = 'Browser & App Caches'
+            Category          = 'Microsoft Edge Web Cache'
+            Icon              = '[EDGE]'
+            Path              = (Join-Path $localAppData 'Microsoft\Edge\User Data\Default\Cache')
+            Description       = 'Cached media and webpage assets in Microsoft Edge'
+            WhatGetsDeleted   = 'Cached media and webpage assets in %LOCALAPPDATA%\Microsoft\Edge\User Data\Default\Cache.'
+            SafetyExplanation = 'Safe: Web media only. Passwords, cookies, browsing history, bookmarks, and open tabs are strictly protected and never touched.'
+            Consequences      = 'First page visits will re-fetch images and scripts from web servers.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'VsCodeCache'
-            Group       = 'Browser & App Caches'
-            Category    = 'VS Code Editor Cache'
-            Icon        = '[VSCODE]'
-            Path        = (Join-Path $appData 'Code\Cache')
-            Description = 'VS Code editor cached runtime files and buffers'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'BraveCache'
+            Group             = 'Browser & App Caches'
+            Category          = 'Brave Browser Cache'
+            Icon              = '[BRAVE]'
+            Path              = (Join-Path $localAppData 'BraveSoftware\Brave-Browser\User Data\Default\Cache')
+            Description       = 'Cached web data in Brave Browser'
+            WhatGetsDeleted   = 'Web asset cache in %LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data\Default\Cache.'
+            SafetyExplanation = 'Safe: Web media only. Crypto wallet keys, passwords, shields settings, and history are strictly protected and untouched.'
+            Consequences      = 'Webpages re-cache static assets upon visit.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $false
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'AdobeMediaCache'
-            Group       = 'Browser & App Caches'
-            Category    = 'Adobe Premiere Media Cache'
-            Icon        = '[ADOBE]'
-            Path        = (Join-Path $appData 'Adobe\Common\Media Cache Files')
-            Description = 'Cached video peak files, conformed audio, and render frames in Adobe CC'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'DiscordCache'
+            Group             = 'Browser & App Caches'
+            Category          = 'Discord App Media Cache'
+            Icon              = '[DISCORD]'
+            Path              = (Join-Path $appData 'discord\Cache')
+            Description       = 'Cached Discord media, avatars, and attachments'
+            WhatGetsDeleted   = 'Cached Discord server avatars, emojis, stickers, and voice buffers in %APPDATA%\discord\Cache.'
+            SafetyExplanation = 'Safe: Media buffer cache only. User logins, server lists, settings, and chats are in separate folders and untouched.'
+            Consequences      = 'Server emojis and avatars re-download seamlessly in the background as you view channels.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         },
         @{
-            Id          = 'TelegramCache'
-            Group       = 'Browser & App Caches'
-            Category    = 'Telegram Desktop Media Cache'
-            Icon        = '[TELEGRAM]'
-            Path        = (Join-Path $appData 'Telegram Desktop\tdata\user_data\media_cache')
-            Description = 'Locally cached stickers, images, and voice notes in Telegram'
-            Type        = 'DirectoryContents'
-            SafetyLevel = 'Optional'
-            Recommended = $false
-            RequiresAdmin = $false
+            Id                = 'SpotifyCache'
+            Group             = 'Browser & App Caches'
+            Category          = 'Spotify Track Storage'
+            Icon              = '[SPOTIFY]'
+            Path              = (Join-Path $localAppData 'Spotify\Storage')
+            Description       = 'Locally cached music streams and playback buffers in Spotify'
+            WhatGetsDeleted   = 'Streamed track chunks and offline song storage in %LOCALAPPDATA%\Spotify\Storage.'
+            SafetyExplanation = 'Optional: Safe to delete to free gigabytes. Cloud playlists, user account, and library are untouched.'
+            Consequences      = 'Any songs previously downloaded for offline listening will need to be re-downloaded over Wi-Fi.'
+            SafetyBadge       = 'OPTIONAL'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Optional'
+            Recommended       = $false
+            RequiresAdmin     = $false
         },
-
-        # ==========================================
-        # 5. RECYCLE BIN
-        # ==========================================
         @{
-            Id          = 'RecycleBin'
-            Group       = 'Recycle Bin'
-            Category    = 'Windows Recycle Bin (C:)'
-            Icon        = '[TRASH]'
-            Path        = (Join-Path $sysDrive '`$Recycle.Bin')
-            Description = 'Deleted files and folders residing in the Windows Recycle Bin'
-            Type        = 'RecycleBin'
-            SafetyLevel = 'Safe'
-            Recommended = $true
-            RequiresAdmin = $false
+            Id                = 'VsCodeCache'
+            Group             = 'Browser & App Caches'
+            Category          = 'VS Code Editor Cache'
+            Icon              = '[VSCODE]'
+            Path              = (Join-Path $appData 'Code\Cache')
+            Description       = 'VS Code editor cached runtime files and buffers'
+            WhatGetsDeleted   = 'V8 code cache and Electron web view buffers in %APPDATA%\Code\Cache.'
+            SafetyExplanation = 'Safe: Internal editor buffer cache. Extensions, user settings (settings.json), keybindings, and workspaces are completely untouched.'
+            Consequences      = 'Rebuilt automatically on next VS Code launch.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
+        },
+        @{
+            Id                = 'AdobeMediaCache'
+            Group             = 'Browser & App Caches'
+            Category          = 'Adobe Premiere Media Cache'
+            Icon              = '[ADOBE]'
+            Path              = (Join-Path $appData 'Adobe\Common\Media Cache Files')
+            Description       = 'Cached video peak files, conformed audio, and render frames in Adobe CC'
+            WhatGetsDeleted   = 'Conformed audio (.cfa), peak files (.pek), and video index frames in %APPDATA%\Adobe\Common\Media Cache Files.'
+            SafetyExplanation = 'Safe: Scratch files generated when media is imported into timelines. Master media files and project files (.prproj, .aep) are NEVER touched.'
+            Consequences      = 'The next time an Adobe project is opened, Premiere or After Effects will regenerate peak and audio waveform files in the background.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
+        },
+        @{
+            Id                = 'TelegramCache'
+            Group             = 'Browser & App Caches'
+            Category          = 'Telegram Desktop Media Cache'
+            Icon              = '[TELEGRAM]'
+            Path              = (Join-Path $appData 'Telegram Desktop\tdata\user_data\media_cache')
+            Description       = 'Locally cached stickers, images, and voice notes in Telegram'
+            WhatGetsDeleted   = 'Cached sticker packs, voice note buffers, and image thumbnails in %APPDATA%\Telegram Desktop\tdata\user_data\media_cache.'
+            SafetyExplanation = 'Optional: Safe to delete. All media is safely retained in the Telegram cloud. Downloaded files in Downloads folder and account logins are untouched.'
+            Consequences      = 'Stickers and photo previews will re-download from the Telegram cloud as you scroll through chats.'
+            SafetyBadge       = 'OPTIONAL'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Optional'
+            Recommended       = $false
+            RequiresAdmin     = $false
+        },
+        @{
+            Id                = 'RecycleBin'
+            Group             = 'Recycle Bin'
+            Category          = 'Windows Recycle Bin (C:)'
+            Icon              = '[TRASH]'
+            Path              = (Join-Path $sysDrive '`$Recycle.Bin')
+            Description       = 'Deleted files and folders residing in the Windows Recycle Bin'
+            WhatGetsDeleted   = 'Files and folders previously discarded into the Recycle Bin on drive C:.'
+            SafetyExplanation = 'Safe (with confirmation): Permanently purges items that the user previously moved to the trash.'
+            Consequences      = 'Purged items are permanently deleted and cannot be restored from the Recycle Bin.'
+            SafetyBadge       = 'SAFE'
+            Type              = 'RecycleBin'
+            SafetyLevel       = 'Safe'
+            Recommended       = $true
+            RequiresAdmin     = $false
         }
     )
 
@@ -1404,23 +1533,27 @@ function Scan-SmartCleanupItems {
         $displayName = if ($t.RequiresAdmin -and -not $isAdminCurrent) { "$($t.Category) [Admin Required]" } else { $t.Category }
 
         $results += [PSCustomObject]@{
-            Id            = $t.Id
-            Group         = $t.Group
-            CategoryName  = $t.Category
-            Icon          = $t.Icon
-            DisplayName   = $displayName
-            Target        = $t.Path
-            Type          = $t.Type
-            SafetyLevel   = $t.SafetyLevel
-            RawBytes      = [long]$rawBytes
-            DisplaySize   = $disp
-            FileCount     = "$fileCount items"
-            RawCount      = [int]$fileCount
-            Description   = $t.Description
-            Recommended   = [bool]$t.Recommended
-            RequiresAdmin = [bool]$t.RequiresAdmin
-            IsSelected    = [bool]$isSelected
-            PathExists    = [bool]$pathExists
+            Id                = $t.Id
+            Group             = $t.Group
+            CategoryName      = $t.Category
+            Icon              = $t.Icon
+            DisplayName       = $displayName
+            Target            = $t.Path
+            Type              = $t.Type
+            SafetyLevel       = $t.SafetyLevel
+            SafetyBadge       = $t.SafetyBadge
+            WhatGetsDeleted   = $t.WhatGetsDeleted
+            SafetyExplanation = $t.SafetyExplanation
+            Consequences      = $t.Consequences
+            RawBytes          = [long]$rawBytes
+            DisplaySize       = $disp
+            FileCount         = "$fileCount items"
+            RawCount          = [int]$fileCount
+            Description       = $t.Description
+            Recommended       = [bool]$t.Recommended
+            RequiresAdmin     = [bool]$t.RequiresAdmin
+            IsSelected        = [bool]$isSelected
+            PathExists        = [bool]$pathExists
         }
     }
 
@@ -1923,10 +2056,10 @@ $embeddedXaml = @'
         WindowStartupLocation="CenterScreen"
         Background="#141416"
         Foreground="#EDEDED"
-        FontFamily="Segoe UI, -apple-system, BlinkMacSystemFont, Roboto, sans-serif"
+        FontFamily="Segoe UI"
         UseLayoutRounding="True"
         SnapsToDevicePixels="True"
-        TextOptions.TextFormattingMode="Display"
+        TextOptions.TextFormattingMode="Ideal"
         TextOptions.TextRenderingMode="ClearType"
         RenderOptions.ClearTypeHint="Enabled">
 
@@ -2325,7 +2458,9 @@ $embeddedXaml = @'
                     </Grid>
 
                     <!-- Junk Categories DataGrid -->
-                    <DataGrid x:Name="GridCleanableCategories" Grid.Row="1" AutoGenerateColumns="False">
+                    <DataGrid x:Name="GridCleanableCategories" Grid.Row="1" AutoGenerateColumns="False"
+                              CanUserAddRows="False" CanUserDeleteRows="False" CanUserResizeRows="False"
+                              VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.ScrollUnit="Pixel">
                         <DataGrid.Columns>
                             <DataGridCheckBoxColumn Header="Clean?" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="55"/>
                             <DataGridTextColumn Header="Category" Binding="{Binding DisplayName}" Width="240" FontWeight="SemiBold"/>
@@ -2337,27 +2472,83 @@ $embeddedXaml = @'
                         </DataGrid.Columns>
                     </DataGrid>
 
-                    <!-- Bottom Action Controls for Selected Category -->
-                    <Grid Grid.Row="2" Margin="0,10,0,0">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
+                    <!-- Category Safety & Deletion Details Card (Fixed Height = Zero Layout Shift) -->
+                    <Border Grid.Row="2" Height="148" Background="#1B1B1F" BorderBrush="#333338" BorderThickness="1" CornerRadius="6" Margin="0,10,0,0" Padding="12,10">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
 
-                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                            <TextBlock x:Name="TxtSelectedCategoryInfo" Text="Select a category above to view files in File Explorer or clean individually." Foreground="#A1A1AA" FontSize="12"/>
-                            <TextBlock x:Name="TxtSelectedCategoryDesc" Text="" Foreground="#71717A" FontSize="11" Margin="0,2,0,0"/>
-                        </StackPanel>
+                            <!-- Header Row: Category Title + Safety Badge Pill + Action Buttons -->
+                            <Grid Grid.Row="0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
 
-                        <!-- Step 1: Open in Explorer (User requirement) -->
-                        <Button x:Name="BtnOpenCategoryInExplorer" Grid.Column="1" Content="Open in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,8,0"/>
-                        <!-- Step 2: In-app File Inspector -->
-                        <Button x:Name="BtnInspectCategoryFiles" Grid.Column="2" Content="View Files in Inspector" Margin="0,0,8,0"/>
-                        <!-- Step 3: Clean Single Category -->
-                        <Button x:Name="BtnCleanSingleCategory" Grid.Column="3" Content="Clean Category" Style="{StaticResource DangerActionBtn}"/>
-                    </Grid>
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <TextBlock x:Name="TxtSelectedCategoryTitle" Text="Category Details &amp; Safety Profile" FontWeight="Bold" FontSize="13" Foreground="#EDEDED" VerticalAlignment="Center"/>
+                                    <Border x:Name="BadgeSafetyLevel" Background="#2EC4B6" CornerRadius="3" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center" MinWidth="68">
+                                        <TextBlock x:Name="TxtSelectedCategorySafetyBadge" Text="SAFE" FontSize="10" FontWeight="Bold" Foreground="#141416" TextAlignment="Center" HorizontalAlignment="Center"/>
+                                    </Border>
+                                    <TextBlock x:Name="TxtSelectedCategorySizeInfo" Text="" Foreground="#A1A1AA" FontSize="12" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                                    <!-- Compatibility references (collapsed) -->
+                                    <TextBlock x:Name="TxtSelectedCategoryInfo" Visibility="Collapsed"/>
+                                    <TextBlock x:Name="TxtSelectedCategoryDesc" Visibility="Collapsed"/>
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                                    <Button x:Name="BtnOpenCategoryInExplorer" Content="Open in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,6,0"/>
+                                    <Button x:Name="BtnInspectCategoryFiles" Content="View Files in Inspector" Margin="0,0,6,0"/>
+                                    <Button x:Name="BtnCleanSingleCategory" Content="Clean Category" Style="{StaticResource DangerActionBtn}"/>
+                                </StackPanel>
+                            </Grid>
+
+                            <!-- Divider -->
+                            <Rectangle Grid.Row="1" Height="1" Fill="#27272A" Margin="0,8,0,8"/>
+
+                            <!-- 3-Column Explanations Grid: What Gets Deleted | Why It's Safe & Protected | Consequences & Rebuild -->
+                            <Grid Grid.Row="2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+
+                                <!-- Column 1: What Gets Deleted -->
+                                <Border Grid.Column="0" Background="#141416" BorderBrush="#27272A" BorderThickness="1" CornerRadius="4" Padding="10,8" Margin="0,0,6,0">
+                                    <DockPanel LastChildFill="True">
+                                        <TextBlock DockPanel.Dock="Top" Text="TARGET FILES &amp; DATA" FontSize="10" FontWeight="Bold" Foreground="#00B4D8" Margin="0,0,0,4"/>
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Background="Transparent">
+                                            <TextBlock x:Name="TxtCategoryWhatDeleted" Text="Select a category above to view specific target file types and paths." FontSize="11" Foreground="#D4D4D8" TextWrapping="Wrap"/>
+                                        </ScrollViewer>
+                                    </DockPanel>
+                                </Border>
+
+                                <!-- Column 2: Why It's Safe & Protected Data -->
+                                <Border Grid.Column="1" Background="#141416" BorderBrush="#27272A" BorderThickness="1" CornerRadius="4" Padding="10,8" Margin="3,0,3,0">
+                                    <DockPanel LastChildFill="True">
+                                        <TextBlock DockPanel.Dock="Top" Text="SAFETY &amp; PROTECTED DATA" FontSize="10" FontWeight="Bold" Foreground="#2EC4B6" Margin="0,0,0,4"/>
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Background="Transparent">
+                                            <TextBlock x:Name="TxtCategorySafetyExp" Text="Personal documents, passwords, credentials, and settings are never touched." FontSize="11" Foreground="#D4D4D8" TextWrapping="Wrap"/>
+                                        </ScrollViewer>
+                                    </DockPanel>
+                                </Border>
+
+                                <!-- Column 3: Post-Deletion Consequences -->
+                                <Border Grid.Column="2" Background="#141416" BorderBrush="#27272A" BorderThickness="1" CornerRadius="4" Padding="10,8" Margin="6,0,0,0">
+                                    <DockPanel LastChildFill="True">
+                                        <TextBlock DockPanel.Dock="Top" Text="POST-CLEANUP IMPACT" FontSize="10" FontWeight="Bold" Foreground="#FFB703" Margin="0,0,0,4"/>
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Background="Transparent">
+                                            <TextBlock x:Name="TxtCategoryConsequences" Text="Explains whether files auto-regenerate or require network reload." FontSize="11" Foreground="#D4D4D8" TextWrapping="Wrap"/>
+                                        </ScrollViewer>
+                                    </DockPanel>
+                                </Border>
+                            </Grid>
+                        </Grid>
+                    </Border>
                 </Grid>
             </TabItem>
 
@@ -2600,6 +2791,13 @@ $btnRunCleanup             = Find-Control "BtnRunCleanup"
 $gridCleanCategories       = Find-Control "GridCleanableCategories"
 $txtSelectedCatInfo        = Find-Control "TxtSelectedCategoryInfo"
 $txtSelectedCatDesc        = Find-Control "TxtSelectedCategoryDesc"
+$txtSelectedCatTitle       = Find-Control "TxtSelectedCategoryTitle"
+$badgeSafetyLevel          = Find-Control "BadgeSafetyLevel"
+$txtSelectedCatSafetyBadge = Find-Control "TxtSelectedCategorySafetyBadge"
+$txtSelectedCatSizeInfo    = Find-Control "TxtSelectedCategorySizeInfo"
+$txtCategoryWhatDeleted    = Find-Control "TxtCategoryWhatDeleted"
+$txtCategorySafetyExp      = Find-Control "TxtCategorySafetyExp"
+$txtCategoryConsequences   = Find-Control "TxtCategoryConsequences"
 $btnOpenCatInExplorer      = Find-Control "BtnOpenCategoryInExplorer"
 $btnInspectCatFiles        = Find-Control "BtnInspectCategoryFiles"
 $btnCleanSingleCategory    = Find-Control "BtnCleanSingleCategory"
@@ -2753,8 +2951,39 @@ $btnFilterBrowser.add_Click({ Apply-CleanupFilter "Browser" })
 $gridCleanCategories.add_SelectionChanged({
     $sel = $gridCleanCategories.SelectedItem
     if ($sel) {
-        $txtSelectedCatInfo.Text = "$($sel.DisplayName) - Size: $($sel.DisplaySize) ($($sel.FileCount))"
-        $txtSelectedCatDesc.Text = "$($sel.Description)"
+        if ($txtSelectedCatInfo) { $txtSelectedCatInfo.Text = "$($sel.DisplayName) - Size: $($sel.DisplaySize) ($($sel.FileCount))" }
+        if ($txtSelectedCatDesc) { $txtSelectedCatDesc.Text = "$($sel.Description)" }
+
+        if ($txtSelectedCatTitle) {
+            $txtSelectedCatTitle.Text = "$($sel.DisplayName)"
+        }
+        if ($txtSelectedCatSizeInfo) {
+            $bullet = [char]0x2022
+            $txtSelectedCatSizeInfo.Text = "$bullet Size on C: $($sel.DisplaySize) ($($sel.FileCount))"
+        }
+        if ($txtSelectedCatSafetyBadge) {
+            $badgeText = if ($sel.SafetyBadge) { $sel.SafetyBadge } else { $sel.SafetyLevel.ToUpper() }
+            $txtSelectedCatSafetyBadge.Text = $badgeText
+            if ($badgeSafetyLevel) {
+                if ($sel.SafetyLevel -eq 'Advanced') {
+                    $badgeSafetyLevel.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#E63946")
+                } elseif ($sel.SafetyLevel -eq 'Optional') {
+                    $badgeSafetyLevel.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#FFB703")
+                } else {
+                    $badgeSafetyLevel.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#2EC4B6")
+                }
+            }
+        }
+        if ($txtCategoryWhatDeleted) {
+            $txtCategoryWhatDeleted.Text = if ($sel.WhatGetsDeleted) { $sel.WhatGetsDeleted } else { $sel.Description }
+        }
+        if ($txtCategorySafetyExp) {
+            $txtCategorySafetyExp.Text = if ($sel.SafetyExplanation) { $sel.SafetyExplanation } else { "Safe to delete. User documents and credentials are untouched." }
+        }
+        if ($txtCategoryConsequences) {
+            $txtCategoryConsequences.Text = if ($sel.Consequences) { $sel.Consequences } else { "Files will be regenerated or re-downloaded as needed." }
+        }
+
         Update-SelectedCleanupBadge
     }
 })
@@ -2803,9 +3032,11 @@ $btnInspectCatFiles.add_Click({
 # 3. Action: Clean Selected Junk (Bulk with Live Streaming Progress)
 $btnRunCleanup.add_Click({
     $targetsToClean = @()
+    $totalCleanBytes = 0
     foreach ($item in $global:ScannedCleanupItems) {
         if ($item.IsSelected -eq $true -and $item.RawBytes -gt 0) {
             $targetsToClean += $item
+            $totalCleanBytes += [int64]$item.RawBytes
         }
     }
 
@@ -2814,16 +3045,31 @@ $btnRunCleanup.add_Click({
         return
     }
 
-    $totalBytes = ($targetsToClean | Measure-Object -Property RawBytes -Sum).Sum
-    $hasAdvanced = ($targetsToClean | Where-Object { $_.SafetyLevel -eq 'Advanced' -or $_.Id -in @('WinUpdateCache', 'DeliveryOpt') }).Count -gt 0
-    $advWarning = ""
-    if ($hasAdvanced) {
-        $advWarning = "`n`n[ADVANCED CLEANUP NOTICE]`nWindows Update Cache cleanup is selected. Diskman will verify that Windows Update and servicing components are idle before cleaning. Windows may need to re-download update files if updates are in progress."
+    $safeCount = @($targetsToClean | Where-Object { $_.SafetyLevel -eq 'Safe' }).Count
+    $optCount  = @($targetsToClean | Where-Object { $_.SafetyLevel -eq 'Optional' }).Count
+    $advCount  = @($targetsToClean | Where-Object { $_.SafetyLevel -eq 'Advanced' }).Count
+
+    $breakdown = "Selected Breakdown: $safeCount Safe, $optCount Optional, $advCount Advanced."
+    if ($advCount -gt 0) {
+        $breakdown += "`n`n[ADVANCED NOTICE] Windows Update and servicing caches are selected. Diskman will verify that servicing components (wuauserv, BITS, CBS) are completely idle before cleaning."
+    }
+    if ($optCount -gt 0) {
+        $breakdown += "`n`n[OPTIONAL NOTICE] Developer or offline media caches are selected. Missing packages or offline tracks may be re-downloaded over the network on demand."
     }
 
+    $bullet = [char]0x2022
+    $confirmMsg = "Proceed with cleaning $(Format-Bytes -Bytes $totalCleanBytes) across $($targetsToClean.Count) selected C: drive categories?`n`n" +
+                  "$breakdown`n`n" +
+                  "Diskman Multi-Layer Safety Guarantee:`n" +
+                  "$bullet Personal documents, photos, and desktop files are NEVER touched.`n" +
+                  "$bullet Browser passwords, saved logins, cookies, and bookmarks are strictly protected.`n" +
+                  "$bullet Game installations, save games, and user profiles are preserved.`n" +
+                  "$bullet Real-time deletion activity will stream live below.`n`n" +
+                  "Execute cleanup pipeline?"
+
     $confirm = [System.Windows.MessageBox]::Show(
-        "Proceed with cleaning $(Format-Bytes -Bytes $totalBytes) across $($targetsToClean.Count) selected C: drive junk categories?$advWarning`n`nDiskman will safely remove selected cache files and purge trash.`n`nReal-time deletion progress will stream live to the terminal window and activity log.",
-        "Confirm C: Drive Cleanup",
+        $confirmMsg,
+        "Confirm C: Drive Cleanup Pipeline",
         [System.Windows.MessageBoxButton]::YesNo,
         [System.Windows.MessageBoxImage]::Warning
     )
@@ -2831,9 +3077,9 @@ $btnRunCleanup.add_Click({
     if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
         Log-Console "=========================================================="
         Log-Console "EXECUTING C: DRIVE CLEANUP PIPELINE"
-        Log-Console "Total Selected Space: $(Format-Bytes -Bytes $totalBytes) ($($targetsToClean.Count) categories)"
+        Log-Console "Total Selected Space: $(Format-Bytes -Bytes $totalCleanBytes) ($($targetsToClean.Count) categories: $safeCount Safe, $optCount Optional, $advCount Advanced)"
         
-        $hasAdminTargets = ($targetsToClean | Where-Object { $_.RequiresAdmin -eq $true }).Count -gt 0
+        $hasAdminTargets = @($targetsToClean | Where-Object { $_.RequiresAdmin -eq $true }).Count -gt 0
         if ($hasAdminTargets -and -not $isAdmin) {
             Log-Console "Notice: Selected system items require Administrator rights. Run via run.bat (Admin) if locked items are skipped." "WARN"
         }
@@ -2877,14 +3123,23 @@ $btnCleanSingleCategory.add_Click({
         return
     }
 
-    $advNotice = ""
-    if ($sel.SafetyLevel -eq 'Advanced' -or $sel.Id -in @('WinUpdateCache', 'DeliveryOpt')) {
-        $advNotice = "`n`n[ADVANCED CLEANUP NOTICE]`nThis removes downloaded Windows Update cache files. Windows may need to download them again. Do not use this while Windows is installing updates or waiting for a restart."
-    }
+    $safetyText = if ($sel.SafetyExplanation) { $sel.SafetyExplanation } else { "Safe to delete. User files and credentials are untouched." }
+    $deletedText = if ($sel.WhatGetsDeleted) { $sel.WhatGetsDeleted } else { $sel.Description }
+    $consequencesText = if ($sel.Consequences) { $sel.Consequences } else { "Files auto-regenerate on next launch." }
+    $badgeText = if ($sel.SafetyBadge) { $sel.SafetyBadge } else { $sel.SafetyLevel.ToUpper() }
+
+    $dialogMsg = "CLEANUP VERIFICATION & IMPACT DETAILS`n`n" +
+                 "Category: $($sel.CategoryName) [$badgeText]`n" +
+                 "Size on C: $($sel.DisplaySize) ($($sel.FileCount))`n" +
+                 "Path: $($sel.Target)`n`n" +
+                 "[WHAT GETS DELETED]`n$deletedText`n`n" +
+                 "[SAFETY & PROTECTED DATA]`n$safetyText`n`n" +
+                 "[CONSEQUENCES & REBUILD]`n$consequencesText`n`n" +
+                 "Proceed with deleting these files?"
 
     $confirm = [System.Windows.MessageBox]::Show(
-        "Clean all files in '$($sel.CategoryName)' ($($sel.DisplaySize))?$advNotice`n`nLocation: $($sel.Target)",
-        "Confirm Category Cleanup",
+        $dialogMsg,
+        "Confirm Cleanup - $($sel.CategoryName)",
         [System.Windows.MessageBoxButton]::YesNo,
         [System.Windows.MessageBoxImage]::Question
     )
@@ -3138,8 +3393,19 @@ if ($isAdmin) {
 Log-Console "=========================================================="
 
 Update-CDriveMetricsDisplay
-Start-ScanCJunk
-Load-Directory "C:\"
+
+# Instant-Launch Hook: Render the GUI window immediately (< 1s), then initiate background scan
+$window.add_ContentRendered({
+    Start-ScanCJunk
+})
+
+# Defer Directory Explorer loading until the tab is switched to
+$mainTabControl.add_SelectionChanged({
+    if ($mainTabControl.SelectedIndex -eq 3 -and $null -eq $global:CurrentExplorerPath) {
+        Load-Directory "C:\"
+    }
+})
 
 # Show Window
 $window.ShowDialog() | Out-Null
+

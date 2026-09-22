@@ -9,8 +9,11 @@ if %errorLevel% neq 0 (
     echo   DISKMAN - Requesting Administrator Privileges...
     echo =====================================================================
     echo.
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process powershell.exe -ArgumentList '-NoProfile -STA -ExecutionPolicy Bypass -File \"\"%~dp0src\app.ps1\"\"' -Verb RunAs"
-    exit /b
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process cmd.exe -ArgumentList '/c \"\"%~f0\"\"' -Verb RunAs" 2>nul
+    if %errorLevel% equ 0 exit /b
+    echo [!] Administrator elevation was not granted or unavailable.
+    echo [*] Launching Diskman in Standard User Mode...
+    echo.
 )
 
 echo =====================================================================

@@ -267,6 +267,23 @@ Assert-Test "Windows User Temp is classified as Safe & Recommended" ($userTempTa
 $dxCacheTarget = $targets | Where-Object { $_.Id -eq 'NvidiaDxCache' } | Select-Object -First 1
 Assert-Test "Shader Cache is classified as Safe" ($dxCacheTarget.SafetyLevel -eq 'Safe')
 
+# Comprehensive Explanation & Safety Audit across ALL cleanable targets
+$missingWhatDeleted = @($targets | Where-Object { [string]::IsNullOrWhiteSpace($_.WhatGetsDeleted) })
+Assert-Test "All 36 targets define accurate 'WhatGetsDeleted' explanations" ($missingWhatDeleted.Count -eq 0) "Missing count: $($missingWhatDeleted.Count)"
+
+$missingSafetyExp = @($targets | Where-Object { [string]::IsNullOrWhiteSpace($_.SafetyExplanation) })
+Assert-Test "All 36 targets define detailed 'SafetyExplanation' rationale" ($missingSafetyExp.Count -eq 0) "Missing count: $($missingSafetyExp.Count)"
+
+$missingConsequences = @($targets | Where-Object { [string]::IsNullOrWhiteSpace($_.Consequences) })
+Assert-Test "All 36 targets define clear 'Consequences' post-deletion behavior" ($missingConsequences.Count -eq 0) "Missing count: $($missingConsequences.Count)"
+
+$invalidSafetyLevels = @($targets | Where-Object { $_.SafetyLevel -notin @('Safe', 'Optional', 'Advanced') })
+Assert-Test "All targets conform to strict 3-tier Safety taxonomy ('Safe', 'Optional', 'Advanced')" ($invalidSafetyLevels.Count -eq 0) "Invalid count: $($invalidSafetyLevels.Count)"
+
+$invalidSafetyBadges = @($targets | Where-Object { $_.SafetyBadge -notin @('SAFE', 'OPTIONAL', 'ADVANCED') })
+Assert-Test "All targets define valid uppercase SafetyBadges" ($invalidSafetyBadges.Count -eq 0) "Invalid count: $($invalidSafetyBadges.Count)"
+
+
 # 6. Test C: Drive Scanner & File Inspection
 Write-Host "`n[6/7] Testing C: Drive Junk Scanner & Shell Functions..." -ForegroundColor Yellow
 $junkItems = Scan-SmartCleanupItems
