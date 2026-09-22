@@ -1557,7 +1557,9 @@ function Scan-SmartCleanupItems {
         }
     }
 
-    return $results
+    # Sort items by size descending: space-claiming items on top, 0-byte items at the end
+    $sortedResults = @($results | Sort-Object -Property @{ Expression = { $_.RawBytes }; Descending = $true }, @{ Expression = { $_.CategoryName }; Descending = $false })
+    return $sortedResults
 }
 
 function Get-CleanableCategoryFiles {
@@ -1629,7 +1631,7 @@ function Get-CleanableCategoryFiles {
         } catch {}
     }
 
-    return ($fileList | Sort-Object RawBytes -Descending | Select-Object -First $Limit)
+    return @($fileList | Sort-Object -Property @{ Expression = { $_.RawBytes }; Descending = $true }, @{ Expression = { $_.Name }; Descending = $false } | Select-Object -First $Limit)
 }
 
 function Invoke-ExecuteCleanup {
@@ -2465,8 +2467,8 @@ $embeddedXaml = @'
                             <DataGridCheckBoxColumn Header="Clean?" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="55"/>
                             <DataGridTextColumn Header="Category" Binding="{Binding DisplayName}" Width="240" FontWeight="SemiBold"/>
                             <DataGridTextColumn Header="Group" Binding="{Binding Group}" Width="140"/>
-                            <DataGridTextColumn Header="Size on C:" Binding="{Binding DisplaySize}" Width="105" FontWeight="Bold" Foreground="#00B4D8"/>
-                            <DataGridTextColumn Header="Items" Binding="{Binding FileCount}" Width="95"/>
+                            <DataGridTextColumn Header="Size on C:" Binding="{Binding DisplaySize}" SortMemberPath="RawBytes" SortDirection="Descending" Width="105" FontWeight="Bold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Items" Binding="{Binding FileCount}" SortMemberPath="RawCount" Width="95"/>
                             <DataGridTextColumn Header="Safety" Binding="{Binding SafetyLevel}" Width="100"/>
                             <DataGridTextColumn Header="Path on C: Drive" Binding="{Binding Target}" Width="*"/>
                         </DataGrid.Columns>
@@ -2580,7 +2582,7 @@ $embeddedXaml = @'
                     <DataGrid x:Name="GridInspectFiles" Grid.Row="1" AutoGenerateColumns="False">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="File Name" Binding="{Binding Name}" Width="250"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="100" FontWeight="SemiBold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="RawBytes" SortDirection="Descending" Width="100" FontWeight="SemiBold" Foreground="#00B4D8"/>
                             <DataGridTextColumn Header="Full Path on C: Drive" Binding="{Binding FullPath}" Width="*"/>
                             <DataGridTextColumn Header="Last Modified" Binding="{Binding LastWriteTime}" Width="140"/>
                         </DataGrid.Columns>
@@ -2638,7 +2640,7 @@ $embeddedXaml = @'
                     <DataGrid x:Name="GridLargeFiles" Grid.Row="1" AutoGenerateColumns="False">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="File Name" Binding="{Binding Name}" Width="240"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="100" FontWeight="Bold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="RawSize" SortDirection="Descending" Width="100" FontWeight="Bold" Foreground="#00B4D8"/>
                             <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="140"/>
                             <DataGridTextColumn Header="Full Path on C: Drive" Binding="{Binding FullPath}" Width="*"/>
                             <DataGridTextColumn Header="Modified" Binding="{Binding LastWriteTime}" Width="130"/>
@@ -2688,7 +2690,7 @@ $embeddedXaml = @'
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Folder / File Name" Binding="{Binding Name}" Width="280"/>
                             <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="60"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="100" FontWeight="SemiBold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="RawSize" SortDirection="Descending" Width="100" FontWeight="SemiBold" Foreground="#00B4D8"/>
                             <DataGridTextColumn Header="% Parent" Binding="{Binding PercentStr}" Width="90"/>
                             <DataGridTextColumn Header="Items" Binding="{Binding ItemCount}" Width="85"/>
                             <DataGridTextColumn Header="Last Modified" Binding="{Binding LastModified}" Width="*"/>
@@ -2871,10 +2873,14 @@ function Apply-CleanupFilter {
     $global:CurrentFilterGroup = $Group
     
     if ($Group -eq "All") {
-        $gridCleanCategories.ItemsSource = $global:ScannedCleanupItems
+        $gridCleanCategories.ItemsSource = [System.Collections.ArrayList]@($global:ScannedCleanupItems)
     } else {
-        $filtered = $global:ScannedCleanupItems | Where-Object { $_.Group -like "*$Group*" }
+        $filtered = @($global:ScannedCleanupItems | Where-Object { $_.Group -like "*$Group*" })
         $gridCleanCategories.ItemsSource = [System.Collections.ArrayList]@($filtered)
+    }
+
+    if ($gridCleanCategories.Items.Count -gt 0) {
+        $gridCleanCategories.SelectedIndex = 0
     }
 }
 
@@ -2883,16 +2889,20 @@ function Start-ScanCJunk {
     Log-Console "Scanning C: drive for unnecessary files, caches, logs, and trash..."
     $items = Scan-SmartCleanupItems
     
-    $global:ScannedCleanupItems = [System.Collections.ArrayList]@($items)
+    # Sort items by size descending: space-claiming items on top, 0-byte items at the end
+    $sortedItems = @($items | Sort-Object -Property @{ Expression = { $_.RawBytes }; Descending = $true }, @{ Expression = { $_.CategoryName }; Descending = $false })
+    
+    $global:ScannedCleanupItems = [System.Collections.ArrayList]@($sortedItems)
     Apply-CleanupFilter $global:CurrentFilterGroup
     
-    # Update Inspect dropdown
+    # Update Inspect dropdown (ordered by size)
     $cmbInspectTarget.Items.Clear()
     $totalReclaimable = 0
     
-    foreach ($item in $items) {
+    foreach ($item in $sortedItems) {
         $totalReclaimable += $item.RawBytes
-        $cmbInspectTarget.Items.Add("$($item.Id) - $($item.CategoryName)") | Out-Null
+        $dispLabel = if ($item.RawBytes -gt 0) { "$($item.Id) - $($item.CategoryName) ($($item.DisplaySize))" } else { "$($item.Id) - $($item.CategoryName)" }
+        $cmbInspectTarget.Items.Add($dispLabel) | Out-Null
         
         if ($item.RawBytes -gt 0) {
             Log-Console "Detected $($item.CategoryName): $($item.DisplaySize) ($($item.FileCount)) at $($item.Target)"
@@ -2901,6 +2911,10 @@ function Start-ScanCJunk {
     
     if ($cmbInspectTarget.Items.Count -gt 0) {
         $cmbInspectTarget.SelectedIndex = 0
+    }
+
+    if ($gridCleanCategories.Items.Count -gt 0) {
+        $gridCleanCategories.SelectedIndex = 0
     }
     
     $txtCReclaimable.Text = "~$(Format-Bytes -Bytes $totalReclaimable)"

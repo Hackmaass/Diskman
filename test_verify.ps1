@@ -289,6 +289,19 @@ Write-Host "`n[6/7] Testing C: Drive Junk Scanner & Shell Functions..." -Foregro
 $junkItems = Scan-SmartCleanupItems
 Assert-Test "Scan-SmartCleanupItems executed successfully" ($junkItems.Count -gt 0) "Scanned $($junkItems.Count) categories."
 
+# Verify items claiming space are sorted on top, and 0-byte items are at the end
+$foundZero = $false
+$sortingValid = $true
+foreach ($item in $junkItems) {
+    if ($item.RawBytes -eq 0) {
+        $foundZero = $true
+    } elseif ($foundZero -and $item.RawBytes -gt 0) {
+        $sortingValid = $false
+        break
+    }
+}
+Assert-Test "Scan-SmartCleanupItems sorts space-claiming items on top and 0 bytes at the end" $sortingValid
+
 $functions = @("Show-ItemInExplorer", "Open-FolderInExplorer", "Send-ItemToRecycleBin", "Remove-ItemPermanently")
 foreach ($fn in $functions) {
     $hasFn = [bool](Get-Command -Name $fn -ErrorAction SilentlyContinue)

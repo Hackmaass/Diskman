@@ -415,8 +415,8 @@
                             <DataGridCheckBoxColumn Header="Clean?" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="55"/>
                             <DataGridTextColumn Header="Category" Binding="{Binding DisplayName}" Width="240" FontWeight="SemiBold"/>
                             <DataGridTextColumn Header="Group" Binding="{Binding Group}" Width="140"/>
-                            <DataGridTextColumn Header="Size on C:" Binding="{Binding DisplaySize}" Width="105" FontWeight="Bold" Foreground="#00B4D8"/>
-                            <DataGridTextColumn Header="Items" Binding="{Binding FileCount}" Width="95"/>
+                            <DataGridTextColumn Header="Size on C:" Binding="{Binding DisplaySize}" SortMemberPath="RawBytes" SortDirection="Descending" Width="105" FontWeight="Bold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Items" Binding="{Binding FileCount}" SortMemberPath="RawCount" Width="95"/>
                             <DataGridTextColumn Header="Safety" Binding="{Binding SafetyLevel}" Width="100"/>
                             <DataGridTextColumn Header="Path on C: Drive" Binding="{Binding Target}" Width="*"/>
                         </DataGrid.Columns>
@@ -530,7 +530,7 @@
                     <DataGrid x:Name="GridInspectFiles" Grid.Row="1" AutoGenerateColumns="False">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="File Name" Binding="{Binding Name}" Width="250"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="100" FontWeight="SemiBold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="RawBytes" SortDirection="Descending" Width="100" FontWeight="SemiBold" Foreground="#00B4D8"/>
                             <DataGridTextColumn Header="Full Path on C: Drive" Binding="{Binding FullPath}" Width="*"/>
                             <DataGridTextColumn Header="Last Modified" Binding="{Binding LastWriteTime}" Width="140"/>
                         </DataGrid.Columns>
@@ -588,7 +588,7 @@
                     <DataGrid x:Name="GridLargeFiles" Grid.Row="1" AutoGenerateColumns="False">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="File Name" Binding="{Binding Name}" Width="240"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="100" FontWeight="Bold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="RawSize" SortDirection="Descending" Width="100" FontWeight="Bold" Foreground="#00B4D8"/>
                             <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="140"/>
                             <DataGridTextColumn Header="Full Path on C: Drive" Binding="{Binding FullPath}" Width="*"/>
                             <DataGridTextColumn Header="Modified" Binding="{Binding LastWriteTime}" Width="130"/>
@@ -638,7 +638,7 @@
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Folder / File Name" Binding="{Binding Name}" Width="280"/>
                             <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="60"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" Width="100" FontWeight="SemiBold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="RawSize" SortDirection="Descending" Width="100" FontWeight="SemiBold" Foreground="#00B4D8"/>
                             <DataGridTextColumn Header="% Parent" Binding="{Binding PercentStr}" Width="90"/>
                             <DataGridTextColumn Header="Items" Binding="{Binding ItemCount}" Width="85"/>
                             <DataGridTextColumn Header="Last Modified" Binding="{Binding LastModified}" Width="*"/>

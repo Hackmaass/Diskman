@@ -171,10 +171,14 @@ function Apply-CleanupFilter {
     $global:CurrentFilterGroup = $Group
     
     if ($Group -eq "All") {
-        $gridCleanCategories.ItemsSource = $global:ScannedCleanupItems
+        $gridCleanCategories.ItemsSource = [System.Collections.ArrayList]@($global:ScannedCleanupItems)
     } else {
-        $filtered = $global:ScannedCleanupItems | Where-Object { $_.Group -like "*$Group*" }
+        $filtered = @($global:ScannedCleanupItems | Where-Object { $_.Group -like "*$Group*" })
         $gridCleanCategories.ItemsSource = [System.Collections.ArrayList]@($filtered)
+    }
+
+    if ($gridCleanCategories.Items.Count -gt 0) {
+        $gridCleanCategories.SelectedIndex = 0
     }
 }
 
@@ -183,16 +187,20 @@ function Start-ScanCJunk {
     Log-Console "Scanning C: drive for unnecessary files, caches, logs, and trash..."
     $items = Scan-SmartCleanupItems
     
-    $global:ScannedCleanupItems = [System.Collections.ArrayList]@($items)
+    # Sort items by size descending: space-claiming items on top, 0-byte items at the end
+    $sortedItems = @($items | Sort-Object -Property @{ Expression = { $_.RawBytes }; Descending = $true }, @{ Expression = { $_.CategoryName }; Descending = $false })
+    
+    $global:ScannedCleanupItems = [System.Collections.ArrayList]@($sortedItems)
     Apply-CleanupFilter $global:CurrentFilterGroup
     
-    # Update Inspect dropdown
+    # Update Inspect dropdown (ordered by size)
     $cmbInspectTarget.Items.Clear()
     $totalReclaimable = 0
     
-    foreach ($item in $items) {
+    foreach ($item in $sortedItems) {
         $totalReclaimable += $item.RawBytes
-        $cmbInspectTarget.Items.Add("$($item.Id) - $($item.CategoryName)") | Out-Null
+        $dispLabel = if ($item.RawBytes -gt 0) { "$($item.Id) - $($item.CategoryName) ($($item.DisplaySize))" } else { "$($item.Id) - $($item.CategoryName)" }
+        $cmbInspectTarget.Items.Add($dispLabel) | Out-Null
         
         if ($item.RawBytes -gt 0) {
             Log-Console "Detected $($item.CategoryName): $($item.DisplaySize) ($($item.FileCount)) at $($item.Target)"
@@ -201,6 +209,10 @@ function Start-ScanCJunk {
     
     if ($cmbInspectTarget.Items.Count -gt 0) {
         $cmbInspectTarget.SelectedIndex = 0
+    }
+
+    if ($gridCleanCategories.Items.Count -gt 0) {
+        $gridCleanCategories.SelectedIndex = 0
     }
     
     $txtCReclaimable.Text = "~$(Format-Bytes -Bytes $totalReclaimable)"

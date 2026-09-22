@@ -695,7 +695,9 @@ function Scan-SmartCleanupItems {
         }
     }
 
-    return $results
+    # Sort items by size descending: space-claiming items on top, 0-byte items at the end
+    $sortedResults = @($results | Sort-Object -Property @{ Expression = { $_.RawBytes }; Descending = $true }, @{ Expression = { $_.CategoryName }; Descending = $false })
+    return $sortedResults
 }
 
 function Get-CleanableCategoryFiles {
@@ -767,7 +769,7 @@ function Get-CleanableCategoryFiles {
         } catch {}
     }
 
-    return ($fileList | Sort-Object RawBytes -Descending | Select-Object -First $Limit)
+    return @($fileList | Sort-Object -Property @{ Expression = { $_.RawBytes }; Descending = $true }, @{ Expression = { $_.Name }; Descending = $false } | Select-Object -First $Limit)
 }
 
 function Invoke-ExecuteCleanup {
