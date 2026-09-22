@@ -353,6 +353,13 @@ if (Test-Path $releaseFile) {
     if (-not $noAstErrors) {
         $errors | ForEach-Object { Write-Host "  Line $($_.Extent.StartLineNumber): $($_.Message)" -ForegroundColor Red }
     }
+
+    $rawBytes = [System.IO.File]::ReadAllBytes($releaseFile)
+    $hasBom = ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF)
+    Assert-Test "Compiled bundle is UTF-8 without BOM (prevents irm | iex '#' error)" (-not $hasBom) "First byte: $($rawBytes[0])"
+
+    $firstChar = if ($rawBytes.Length -gt 0) { [char]$rawBytes[0] } else { '' }
+    Assert-Test "Compiled bundle begins with ASCII comment '#' (0x23)" ($firstChar -eq '#') "First char: '$firstChar'"
 } else {
     Assert-Test "Release file generated at $releaseFile" $false
 }

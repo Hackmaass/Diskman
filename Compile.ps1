@@ -1,4 +1,4 @@
-﻿# Diskman - Build and Packaging Compiler
+# Diskman - Build and Packaging Compiler
 # Compiles modular source files and XAML into a single monolithic standalone `release/diskman.ps1`
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -71,7 +71,8 @@ if (Test-Path $appFile) {
     }
 }
 
-[System.IO.File]::WriteAllText($OutputFile, $sb.ToString(), [System.Text.Encoding]::UTF8)
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($OutputFile, $sb.ToString(), $utf8NoBom)
 
 $fileInfo = Get-Item $OutputFile
 Write-Host "Successfully built: $($fileInfo.FullName)" -ForegroundColor Green

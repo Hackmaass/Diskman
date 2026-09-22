@@ -822,14 +822,40 @@ function Invoke-ExecuteCleanup {
         }
 
         if ($item.Type -eq 'RecycleBin') {
+            $driveLetter = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\', ':') } else { "C" }
             try {
                 if ($null -ne $OnProgress) {
-                    & $OnProgress "Clearing Windows Recycle Bin..." "INFO"
+                    & $OnProgress "Clearing Windows Recycle Bin ($($driveLetter):)... (Purging $($item.FileCount) / $($item.DisplaySize), please wait)" "INFO"
                 }
-                Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+
+                $timer = [System.Diagnostics.Stopwatch]::StartNew()
+                $ps = [PowerShell]::Create().AddScript({
+                    param($dl)
+                    $ProgressPreference = 'SilentlyContinue'
+                    Clear-RecycleBin -DriveLetter $dl -Force -ErrorAction SilentlyContinue
+                }).AddArgument($driveLetter)
+
+                $async = $ps.BeginInvoke()
+                $lastHeartbeat = 0
+                while (-not $async.IsCompleted) {
+                    try { [System.Windows.Forms.Application]::DoEvents() } catch {}
+                    Start-Sleep -Milliseconds 100
+                    $elapsedSec = [math]::Floor($timer.Elapsed.TotalSeconds)
+                    if ($elapsedSec -gt $lastHeartbeat -and $elapsedSec % 2 -eq 0) {
+                        $lastHeartbeat = $elapsedSec
+                        if ($null -ne $OnProgress) {
+                            & $OnProgress "  Purging Recycle Bin in progress ($($elapsedSec)s elapsed)..." "INFO"
+                        }
+                    }
+                }
+                $null = $ps.EndInvoke($async)
+                $ps.Dispose()
+                $timer.Stop()
+
                 $totalFreedBytes += $item.RawBytes
                 $totalDeletedCount += $item.RawCount
-                $msg = "Emptied Recycle Bin (Freed $(Format-Bytes -Bytes $item.RawBytes))"
+                $durationSec = [math]::Round($timer.Elapsed.TotalSeconds, 1)
+                $msg = "Emptied Recycle Bin ($($driveLetter):) (Freed $(Format-Bytes -Bytes $item.RawBytes) in $($durationSec)s)"
                 $logMessages += $msg
                 if ($null -ne $OnProgress) {
                     & $OnProgress $msg "SUCCESS"
