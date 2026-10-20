@@ -12,7 +12,7 @@ Diskman incorporates a multi-layer safety guard engine (`Test-PathSafety`) built
    - The parent `SoftwareDistribution` directory and metadata databases (`DataStore.edb`, logs) are strictly protected.
 
 2. **State-Aware Windows Servicing Guard**:
-   - Before allowing cleanup of downloaded update files (`SoftwareDistribution\Download`), Diskman inspects Windows servicing services (`wuauserv`, `TrustedInstaller`, `UsoSvc`, `WaaSMedicSvc`, `BITS`) and registry pending-reboot/staging keys.
+   - Before allowing cleanup of downloaded update files (`SoftwareDistribution\Download`, `DeliveryOptimization`), Diskman checks for active BITS transfer jobs and for registry pending-reboot/staging indicators (`CBS\RebootPending`, `CBS\RebootInProgress`, `CBS\PackagesPending`, `WindowsUpdate\RebootRequired`, `PostRebootReporting`, `PendingFileRenameOperations`, `UpdateExeVolatile`). A running service on its own is not treated as activity.
    - If Windows is actively servicing, staging, installing, or awaiting a reboot, the cleanup is safely skipped without force-stopping services.
    - Diskman does **not** perform Windows Update reset operations (such as deleting catroot2 or wiping databases) during normal disk cleanup.
 
@@ -20,7 +20,9 @@ Diskman incorporates a multi-layer safety guard engine (`Test-PathSafety`) built
    - Reparse points, symbolic links, and directory junctions are detected and never traversed recursively. Deletions never follow links into external or protected directories.
 
 4. **User Personal Data Protection**:
-   - User profile roots and personal directories (`Desktop`, `Documents`, `Downloads`, `Pictures`, `Music`, `Videos`, `OneDrive`, `Contacts`, `Favorites`, `Saved Games`) are permanently blocked from bulk deletion.
+   - User profile roots and personal directories (`Desktop`, `Documents`, `Downloads`, `Pictures`, `Music`, `Videos`, `OneDrive*`, `Contacts`, `Favorites`, `Saved Games`) are permanently blocked from bulk deletion.
+   - The Large Files Hunter acts on one user-chosen file at a time and uses a separate single-file gate (`Test-PathSafety -SingleFile`). It allows personal folders such as `Downloads`, and additionally blocks `Program Files`, `ProgramData`, `AppData\Local\Packages`, Docker and WSL data. `OneDrive*` stays blocked.
+   - A cleanup target that is itself a junction or symlink is skipped; Diskman never deletes through a link.
 
 5. **Identity & Credential Guard**:
    - Browser credential and session files (`Login Data`, `Cookies`, `History`, `Bookmarks`, `Preferences`, `Web Data`, `Local State`) are explicitly safeguarded.

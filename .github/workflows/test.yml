@@ -1,0 +1,22 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Runs the safety matrix, the sandbox deletion tests, the XAML wiring check and rebuilds release/
+      - name: Run verification suite
+        shell: powershell
+        run: powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\test_verify.ps1
+
+      # test_verify.ps1 rebuilds release/diskman.ps1 from src/. If that changes the committed file, the release is stale.
+      - name: Release is up to date
+        shell: bash
+        run: git diff --exit-code --ignore-cr-at-eol -- release/

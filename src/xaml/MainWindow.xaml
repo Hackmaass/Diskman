@@ -2,7 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Diskman - C: Drive Trash &amp; Storage Cleaner" 
         Height="800" Width="1140" 
-        MinHeight="650" MinWidth="950"
+        MinHeight="700" MinWidth="950"
         WindowStartupLocation="CenterScreen"
         Background="#141416"
         Foreground="#EDEDED"
@@ -26,6 +26,17 @@
         <SolidColorBrush x:Key="AccentRed" Color="#E63946"/>
         <SolidColorBrush x:Key="ConsoleBg" Color="#0D0D0F"/>
 
+        <!-- Keyboard focus ring (visible for Tab navigation, hidden for mouse clicks) -->
+        <Style x:Key="FocusRing">
+            <Setter Property="Control.Template">
+                <Setter.Value>
+                    <ControlTemplate>
+                        <Rectangle Margin="-2" Stroke="#90E0EF" StrokeThickness="2" RadiusX="6" RadiusY="6" SnapsToDevicePixels="True"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Standard Button Style -->
         <Style TargetType="Button">
             <Setter Property="Background" Value="#2A2A30"/>
@@ -36,7 +47,7 @@
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
@@ -70,7 +81,7 @@
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="FontWeight" Value="Bold"/>
             <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
@@ -104,7 +115,7 @@
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="FontWeight" Value="Bold"/>
             <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
@@ -184,7 +195,7 @@
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Padding" Value="18,9"/>
             <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="TabItem">
@@ -264,7 +275,6 @@
             <Setter Property="SelectionUnit" Value="FullRow"/>
             <Setter Property="RowHeight" Value="32"/>
             <Setter Property="FontSize" Value="12"/>
-            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
         </Style>
 
         <!-- DataGrid Column Header Style -->
@@ -277,7 +287,29 @@
             <Setter Property="BorderThickness" Value="0,0,1,1"/>
         </Style>
 
-        <!-- ComboBox Dark Style -->
+        <!-- ComboBox Dark Style (full template: the stock one ignores Background and renders white) -->
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="#EDEDED"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="itemBorder" Background="Transparent" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+                            <ContentPresenter/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="itemBorder" Property="Background" Value="#2A2A30"/>
+                            </Trigger>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="itemBorder" Property="Background" Value="#0077B6"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style TargetType="ComboBox">
             <Setter Property="Background" Value="#202026"/>
             <Setter Property="Foreground" Value="#EDEDED"/>
@@ -285,7 +317,47 @@
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="6,3"/>
             <Setter Property="FontSize" Value="12"/>
-            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton x:Name="toggle" Focusable="False" ClickMode="Press"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border x:Name="box" Background="{Binding Background, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                                                BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                                                BorderThickness="1" CornerRadius="5">
+                                            <Path HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,9,0"
+                                                  Data="M0,0 L4,4 L8,0" Stroke="#A1A1AA" StrokeThickness="1.5"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="box" Property="BorderBrush" Value="#00B4D8"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+                            <ContentPresenter IsHitTestVisible="False" Content="{TemplateBinding SelectionBoxItem}"
+                                              Margin="10,3,28,3" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                            <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                                <Border MinWidth="{TemplateBinding ActualWidth}" MaxHeight="{TemplateBinding MaxDropDownHeight}" Margin="0,2,0,0"
+                                        Background="#202026" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="5">
+                                    <ScrollViewer>
+                                        <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.4"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
     </Window.Resources>
 
@@ -293,7 +365,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
-            <RowDefinition Height="145"/>
+            <RowDefinition Height="96"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
@@ -351,15 +423,19 @@
                     <!-- Drive Meter Bar -->
                     <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="10,0,20,0">
                         <Grid Margin="0,0,0,4">
-                            <TextBlock x:Name="TxtCBarStatus" Text="Drive C: Volume" FontSize="11" Foreground="#A1A1AA" HorizontalAlignment="Left"/>
-                            <TextBlock x:Name="TxtCBarPercent" Text="-- % Used" FontSize="11" FontWeight="Bold" Foreground="#00B4D8" HorizontalAlignment="Right"/>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="TxtCBarStatus" Grid.Column="0" Text="Drive C: Volume" FontSize="11" Foreground="#A1A1AA" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
+                            <TextBlock x:Name="TxtCBarPercent" Grid.Column="1" Text="-- % used" FontSize="11" FontWeight="Bold" Foreground="#00B4D8"/>
                         </Grid>
                         <ProgressBar x:Name="ProgressCDrive" Height="10" Value="50" Maximum="100"/>
                     </StackPanel>
 
                     <StackPanel Grid.Column="4" HorizontalAlignment="Right" VerticalAlignment="Center">
                         <TextBlock Text="Reclaimable Junk on C:" Foreground="#A1A1AA" FontSize="11" HorizontalAlignment="Right"/>
-                        <TextBlock x:Name="TxtCReclaimable" Text="~0.00 GB" FontSize="16" FontWeight="Bold" Foreground="#00B4D8" HorizontalAlignment="Right" Margin="0,2,0,0"/>
+                        <TextBlock x:Name="TxtCReclaimable" Text="Scanning..." FontSize="16" FontWeight="Bold" Foreground="#00B4D8" HorizontalAlignment="Right" Margin="0,2,0,0"/>
                     </StackPanel>
                 </Grid>
             </Border>
@@ -377,43 +453,54 @@
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
-                    <!-- Presets & Actions Toolbar -->
-                    <Grid Grid.Row="0" Margin="0,0,0,10">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
+                    <!-- Presets & Actions Toolbar (two rows so it fits at the minimum window width) -->
+                    <StackPanel Grid.Row="0" Margin="0,0,0,10">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
 
-                        <!-- Selection Presets -->
-                        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                            <Button x:Name="BtnSelectRecommended" Content="Select Recommended" Margin="0,0,6,0"/>
-                            <Button x:Name="BtnSelectAll" Content="Select All" Margin="0,0,6,0"/>
-                            <Button x:Name="BtnClearSelection" Content="Clear All" Margin="0,0,16,0"/>
+                            <!-- Selection Presets -->
+                            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button x:Name="BtnSelectRecommended" Content="Select Recommended" Margin="0,0,6,0"/>
+                                <Button x:Name="BtnSelectAll" Content="Select All" Margin="0,0,6,0"/>
+                                <Button x:Name="BtnClearSelection" Content="Clear All" Margin="0,0,16,0"/>
+                            </StackPanel>
 
-                            <!-- Filter Chips -->
-                            <TextBlock Text="Filter:" Foreground="#71717A" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11"/>
+                            <!-- Right Scan & Clean Buttons -->
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock x:Name="TxtCleanSelectedBadge" Text="Selected: 0 B (0 categories)" FontWeight="Bold" Foreground="#00B4D8" VerticalAlignment="Center" Margin="0,0,12,0" FontSize="13"/>
+                                <Button x:Name="BtnScanCleanable" Content="Scan Junk" Margin="0,0,8,0"/>
+                                <Button x:Name="BtnRunCleanup" Content="Clean Selected Junk" Style="{StaticResource DangerActionBtn}"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- Filter Chips (the active chip is highlighted from app.ps1) -->
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                            <TextBlock Text="Filter:" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11"/>
                             <Button x:Name="BtnFilterAll" Content="All" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
                             <Button x:Name="BtnFilterSystem" Content="System" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
                             <Button x:Name="BtnFilterGaming" Content="Gaming &amp; GPU" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
                             <Button x:Name="BtnFilterDev" Content="Developer" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
                             <Button x:Name="BtnFilterBrowser" Content="Apps &amp; Web" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
                         </StackPanel>
-
-                        <!-- Right Scan & Clean Buttons -->
-                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock x:Name="TxtCleanSelectedBadge" Text="Selected: 0.00 GB" FontWeight="Bold" Foreground="#00B4D8" VerticalAlignment="Center" Margin="0,0,12,0" FontSize="13"/>
-                            <Button x:Name="BtnScanCleanable" Content="Scan Junk" Margin="0,0,8,0"/>
-                            <Button x:Name="BtnRunCleanup" Content="Clean Selected Junk" Style="{StaticResource DangerActionBtn}"/>
-                        </StackPanel>
-                    </Grid>
+                    </StackPanel>
 
                     <!-- Junk Categories DataGrid -->
                     <DataGrid x:Name="GridCleanableCategories" Grid.Row="1" AutoGenerateColumns="False"
                               CanUserAddRows="False" CanUserDeleteRows="False" CanUserResizeRows="False"
                               VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.ScrollUnit="Pixel">
                         <DataGrid.Columns>
-                            <DataGridCheckBoxColumn Header="Clean?" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="55"/>
-                            <DataGridTextColumn Header="Category" Binding="{Binding DisplayName}" Width="240" FontWeight="SemiBold"/>
+                            <!-- Template column: one click toggles the box (the stock checkbox column needs a select click first) -->
+                            <DataGridTemplateColumn Header="Clean?" Width="55">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="Category" Binding="{Binding DisplayName}" Width="270" FontWeight="SemiBold"/>
                             <DataGridTextColumn Header="Group" Binding="{Binding Group}" Width="140"/>
                             <DataGridTextColumn Header="Size on C:" Binding="{Binding DisplaySize}" SortMemberPath="RawBytes" SortDirection="Descending" Width="105" FontWeight="Bold" Foreground="#00B4D8"/>
                             <DataGridTextColumn Header="Items" Binding="{Binding FileCount}" SortMemberPath="RawCount" Width="95"/>
@@ -423,7 +510,7 @@
                     </DataGrid>
 
                     <!-- Category Safety & Deletion Details Card (Fixed Height = Zero Layout Shift) -->
-                    <Border Grid.Row="2" Height="148" Background="#1B1B1F" BorderBrush="#333338" BorderThickness="1" CornerRadius="6" Margin="0,10,0,0" Padding="12,10">
+                    <Border Grid.Row="2" Height="116" Background="#1B1B1F" BorderBrush="#333338" BorderThickness="1" CornerRadius="6" Margin="0,10,0,0" Padding="12,10">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -444,9 +531,6 @@
                                         <TextBlock x:Name="TxtSelectedCategorySafetyBadge" Text="SAFE" FontSize="10" FontWeight="Bold" Foreground="#141416" TextAlignment="Center" HorizontalAlignment="Center"/>
                                     </Border>
                                     <TextBlock x:Name="TxtSelectedCategorySizeInfo" Text="" Foreground="#A1A1AA" FontSize="12" Margin="10,0,0,0" VerticalAlignment="Center"/>
-                                    <!-- Compatibility references (collapsed) -->
-                                    <TextBlock x:Name="TxtSelectedCategoryInfo" Visibility="Collapsed"/>
-                                    <TextBlock x:Name="TxtSelectedCategoryDesc" Visibility="Collapsed"/>
                                 </StackPanel>
 
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">

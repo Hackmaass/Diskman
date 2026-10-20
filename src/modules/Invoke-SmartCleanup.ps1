@@ -1,45 +1,58 @@
+# Folder sizing is the hot path (hundreds of thousands of files): a small compiled walker is ~100x faster than a
+# PowerShell loop. Loaded once per process; the background worker runspace shares it.
+if (-not ('Diskman.FastSize' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+namespace Diskman {
+    public static class FastSize {
+        // Returns { total bytes, file count }. Junctions and symlinks are never followed.
+        public static long[] Measure(string root) {
+            long bytes = 0, count = 0;
+            var pending = new Stack<string>();
+            pending.Push(root);
+            while (pending.Count > 0) {
+                try {
+                    foreach (var entry in new DirectoryInfo(pending.Pop()).EnumerateFileSystemInfos()) {
+                        var dir = entry as DirectoryInfo;
+                        if (dir != null) {
+                            if ((dir.Attributes & FileAttributes.ReparsePoint) == 0) pending.Push(dir.FullName);
+                        } else {
+                            try { bytes += ((FileInfo)entry).Length; count++; } catch { }
+                        }
+                    }
+                } catch { }
+            }
+            return new long[] { bytes, count };
+        }
+    }
+}
+'@
+}
+
 function Get-FolderSizeFast {
     param(
-        [string]$Path,
-        [int]$MaxItems = 25000
+        [string]$Path
     )
 
     if (-not (Test-Path -LiteralPath $Path)) {
         return @{ RawBytes = [long]0; FileCount = 0; Exists = $false }
     }
 
-    try {
-        $totalBytes = [long]0
-        $count = 0
-        $queue = New-Object System.Collections.Generic.Queue[string]
-        $queue.Enqueue($Path)
+    # A target that is itself a junction/symlink points somewhere else (often another drive): never size it
+    if ((Test-ReparsePoint -Path $Path).IsReparsePoint) {
+        return @{ RawBytes = [long]0; FileCount = 0; Exists = $true; IsLink = $true }
+    }
 
-        while ($queue.Count -gt 0 -and $count -lt $MaxItems) {
-            $current = $queue.Dequeue()
-            try {
-                $dirInfo = New-Object System.IO.DirectoryInfo($current)
-                foreach ($file in $dirInfo.EnumerateFiles()) {
-                    try {
-                        $totalBytes += $file.Length
-                        $count++
-                        if ($count -ge $MaxItems) { break }
-                    } catch {}
-                }
-                foreach ($sub in $dirInfo.EnumerateDirectories()) {
-                    # Fast in-memory attribute check for reparse point (junction/symlink)
-                    if ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                        continue
-                    }
-                    # Skip symlinks, junctions, and unverified reparse points to avoid external traversal
-                    $reparseCheck = Test-ReparsePoint -Path $sub.FullName
-                    if (-not $reparseCheck.Success -or $reparseCheck.IsReparsePoint) {
-                        continue
-                    }
-                    $queue.Enqueue($sub.FullName)
-                }
-            } catch {}
-        }
-        return @{ RawBytes = $totalBytes; FileCount = $count; Exists = $true }
+    # Fail loudly: if security software blocked the compile, silent zeros would look like "nothing to clean"
+    if (-not ('Diskman.FastSize' -as [type])) {
+        throw "The Diskman folder-size helper could not be compiled (blocked by security software or a restricted PowerShell mode?). Sizes cannot be measured."
+    }
+
+    try {
+        $m = [Diskman.FastSize]::Measure($Path)
+        return @{ RawBytes = [long]$m[0]; FileCount = [int]$m[1]; Exists = $true }
     } catch {
         return @{ RawBytes = [long]0; FileCount = 0; Exists = $true }
     }
@@ -623,15 +636,15 @@ function Get-CleanableTargets {
             Group             = 'Recycle Bin'
             Category          = 'Windows Recycle Bin (C:)'
             Icon              = '[TRASH]'
-            Path              = (Join-Path $sysDrive '`$Recycle.Bin')
+            Path              = (Join-Path $sysDrive '$Recycle.Bin')
             Description       = 'Deleted files and folders residing in the Windows Recycle Bin'
             WhatGetsDeleted   = 'Files and folders previously discarded into the Recycle Bin on drive C:.'
-            SafetyExplanation = 'Safe (with confirmation): Permanently purges items that the user previously moved to the trash.'
-            Consequences      = 'Purged items are permanently deleted and cannot be restored from the Recycle Bin.'
-            SafetyBadge       = 'SAFE'
+            SafetyExplanation = 'Optional: Permanently purges everything you previously deleted on C:. Review the Recycle Bin first if you might want something back.'
+            Consequences      = 'Purged items are permanently deleted and cannot be restored.'
+            SafetyBadge       = 'OPTIONAL'
             Type              = 'RecycleBin'
-            SafetyLevel       = 'Safe'
-            Recommended       = $true
+            SafetyLevel       = 'Optional'
+            Recommended       = $false
             RequiresAdmin     = $false
         }
     )
@@ -641,32 +654,23 @@ function Get-CleanableTargets {
 
 function Scan-SmartCleanupItems {
     [CmdletBinding()]
-    param()
+    param(
+        # Scan only these target ids (default: all targets)
+        [string[]]$Id
+    )
 
     $targets = Get-CleanableTargets
+    if ($Id) { $targets = @($targets | Where-Object { $_.Id -in $Id }) }
     $results = @()
-    $sysDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\', '/') } else { "C:" }
+    $isAdminCurrent = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
     foreach ($t in $targets) {
-        $rawBytes = [long]0
-        $fileCount = 0
-        $pathExists = $false
-
-        if ($t.Type -eq 'RecycleBin') {
-            $recyclePath = "$sysDrive\`$Recycle.Bin"
-            $stats = Get-FolderSizeFast -Path $recyclePath
-            $rawBytes = $stats.RawBytes
-            $fileCount = $stats.FileCount
-            $pathExists = $stats.Exists
-        } else {
-            $stats = Get-FolderSizeFast -Path $t.Path
-            $rawBytes = $stats.RawBytes
-            $fileCount = $stats.FileCount
-            $pathExists = $stats.Exists
-        }
+        $stats = Get-FolderSizeFast -Path $t.Path
+        $rawBytes = $stats.RawBytes
+        $fileCount = $stats.FileCount
+        $pathExists = $stats.Exists
 
         $disp = Format-Bytes -Bytes $rawBytes
-        $isAdminCurrent = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         $isSelected = ($t.Recommended -and $rawBytes -gt 0 -and (-not $t.RequiresAdmin -or $isAdminCurrent))
         $displayName = if ($t.RequiresAdmin -and -not $isAdminCurrent) { "$($t.Category) [Admin Required]" } else { $t.Category }
 
@@ -717,12 +721,16 @@ function Get-CleanableCategoryFiles {
         return @()
     }
 
-    $fileList = @()
+    $fileList = New-Object System.Collections.Generic.List[object]
 
     if (Test-Path -LiteralPath $target.Path) {
         try {
             $targetSafety = Test-PathSafety -Path $target.Path
             if (-not $targetSafety.Safe) {
+                return @()
+            }
+            # A linked target points elsewhere: list nothing rather than files from another drive
+            if ((Test-ReparsePoint -Path $target.Path).IsReparsePoint) {
                 return @()
             }
 
@@ -743,25 +751,21 @@ function Get-CleanableCategoryFiles {
                             $fileSafety = Test-PathSafety -Path $f.FullName
                             if (-not $fileSafety.Safe) { continue }
 
-                            $fileList += [PSCustomObject]@{
+                            $fileList.Add([PSCustomObject]@{
                                 Name          = $f.Name
                                 FullPath      = $f.FullName
                                 RawBytes      = [long]$f.Length
                                 DisplaySize   = Format-Bytes -Bytes $f.Length
                                 LastWriteTime = $f.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
                                 Extension     = $f.Extension
-                            }
+                            })
                             $inspectedCount++
                         } catch {}
                     }
 
                     # Enumerate direct subdirectories; skip all reparse points
                     foreach ($sub in $dirInfo.EnumerateDirectories()) {
-                        $reparseCheck = Test-ReparsePoint -Path $sub.FullName
-                        if (-not $reparseCheck.Success -or $reparseCheck.IsReparsePoint) {
-                            # Skip reparse points and unverified directories
-                            continue
-                        }
+                        if ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
                         $queue.Enqueue($sub.FullName)
                     }
                 } catch {}
@@ -829,39 +833,27 @@ function Invoke-ExecuteCleanup {
                 }
 
                 $timer = [System.Diagnostics.Stopwatch]::StartNew()
-                $ps = [PowerShell]::Create().AddScript({
-                    param($dl)
-                    $ProgressPreference = 'SilentlyContinue'
-                    Clear-RecycleBin -DriveLetter $dl -Force -ErrorAction SilentlyContinue
-                }).AddArgument($driveLetter)
-
-                $async = $ps.BeginInvoke()
-                $lastHeartbeat = 0
-                while (-not $async.IsCompleted) {
-                    try { [System.Windows.Forms.Application]::DoEvents() } catch {}
-                    Start-Sleep -Milliseconds 100
-                    $elapsedSec = [math]::Floor($timer.Elapsed.TotalSeconds)
-                    if ($elapsedSec -gt $lastHeartbeat -and $elapsedSec % 2 -eq 0) {
-                        $lastHeartbeat = $elapsedSec
-                        if ($null -ne $OnProgress) {
-                            & $OnProgress "  Purging Recycle Bin in progress ($($elapsedSec)s elapsed)..." "INFO"
-                        }
-                    }
-                }
-                $null = $ps.EndInvoke($async)
-                $ps.Dispose()
+                $ProgressPreference = 'SilentlyContinue'
+                Clear-RecycleBin -DriveLetter $driveLetter -Force -ErrorAction Stop
                 $timer.Stop()
 
-                $totalFreedBytes += $item.RawBytes
-                $totalDeletedCount += $item.RawCount
+                # Report what actually left the bin, not what the scan saw before
+                $remaining = Get-FolderSizeFast -Path $item.Target
+                $freed = [math]::Max([long]0, [long]$item.RawBytes - [long]$remaining.RawBytes)
+                $totalFreedBytes += $freed
+                $totalDeletedCount += [math]::Max(0, [int]$item.RawCount - [int]$remaining.FileCount)
                 $durationSec = [math]::Round($timer.Elapsed.TotalSeconds, 1)
-                $msg = "Emptied Recycle Bin ($($driveLetter):) (Freed $(Format-Bytes -Bytes $item.RawBytes) in $($durationSec)s)"
+                $msg = "Emptied Recycle Bin ($($driveLetter):) (Freed $(Format-Bytes -Bytes $freed) in $($durationSec)s)"
                 $logMessages += $msg
                 if ($null -ne $OnProgress) {
                     & $OnProgress $msg "SUCCESS"
                 }
             } catch {
-                $msg = "Notice: Recycle Bin purge completed with warnings: $_"
+                # Clear-RecycleBin can report a problem after emptying most of the bin: still report what really left it
+                $remaining = Get-FolderSizeFast -Path $item.Target
+                $freed = [math]::Max([long]0, [long]$item.RawBytes - [long]$remaining.RawBytes)
+                $totalFreedBytes += $freed
+                $msg = "Recycle Bin purge reported a problem: $_ (freed $(Format-Bytes -Bytes $freed))"
                 $logMessages += $msg
                 if ($null -ne $OnProgress) {
                     & $OnProgress $msg "WARN"
@@ -884,7 +876,17 @@ function Invoke-ExecuteCleanup {
                 continue
             }
 
-            $initialCategoryBytes = $item.RawBytes
+            # A target that is itself a junction/symlink points elsewhere (e.g. a cache moved to D:): never delete through it
+            if ((Test-ReparsePoint -Path $targetPath).IsReparsePoint) {
+                $msg = "SKIPPED $($item.CategoryName): $targetPath is a link to another location, so Diskman will not clean through it."
+                $logMessages += $msg
+                if ($null -ne $OnProgress) {
+                    & $OnProgress "  [!] $msg" "WARN"
+                }
+                continue
+            }
+
+            $initialCategoryBytes = [long]$item.RawBytes
             $catFreedBytes = [long]0
             $catDeletedCount = 0
             $catSkippedCount = 0
@@ -904,13 +906,10 @@ function Invoke-ExecuteCleanup {
                         continue
                     }
 
-                    $entryBytes = [long]0
                     $entryDeleted = $false
 
                     try {
                         if ($entry.PSIsContainer) {
-                            $entryBytes = (Get-FolderSizeFast -Path $entry.FullName).RawBytes
-
                             # Detect Reparse Points / Junctions / Symbolic Links (Fail-Closed)
                             $reparseCheck = Test-ReparsePoint -Path $entry.FullName
                             if (-not $reparseCheck.Success) {
@@ -953,8 +952,6 @@ function Invoke-ExecuteCleanup {
                                 }
                             }
                         } else {
-                            $entryBytes = [long]$entry.Length
-
                             try {
                                 [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
                             } catch {}
@@ -976,7 +973,6 @@ function Invoke-ExecuteCleanup {
 
                         if ($entryDeleted) {
                             $catDeletedCount++
-                            $catFreedBytes += $entryBytes
 
                             if ($catDeletedCount % 5 -eq 0 -or $catDeletedCount -le 3 -or $catDeletedCount -eq $totalInCat) {
                                 if ($null -ne $OnProgress) {
@@ -990,12 +986,11 @@ function Invoke-ExecuteCleanup {
                         $catSkippedCount++
                     }
 
-                    try { [System.Windows.Forms.Application]::DoEvents() } catch {}
                 }
 
-                if ($catFreedBytes -le 0 -and $catDeletedCount -gt 0) {
-                    $catFreedBytes = $initialCategoryBytes
-                }
+                # Freed = what the scan saw minus what is still there now (never an estimate)
+                $remaining = Get-FolderSizeFast -Path $targetPath
+                $catFreedBytes = [math]::Max([long]0, $initialCategoryBytes - [long]$remaining.RawBytes)
 
                 $totalFreedBytes += $catFreedBytes
                 $totalDeletedCount += $catDeletedCount
@@ -1042,10 +1037,9 @@ function Invoke-ExecuteCategoryCleanup {
         [scriptblock]$OnProgress = $null
     )
 
-    $targets = Scan-SmartCleanupItems
-    $item = $targets | Where-Object { $_.Id -eq $TargetId } | Select-Object -First 1
+    $item = Scan-SmartCleanupItems -Id $TargetId | Select-Object -First 1
     if (-not $item) {
-        return @{ Success = $false; Message = 'Target category not found.' }
+        return [PSCustomObject]@{ TotalFreedBytes = [long]0; DisplayFreed = '0 B'; DeletedCount = 0; Logs = @('Target category not found.') }
     }
 
     $item.IsSelected = $true

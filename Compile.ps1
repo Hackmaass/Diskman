@@ -69,10 +69,21 @@ if (Test-Path $appFile) {
             $null = $sb.AppendLine($line)
         }
     }
+    # Without the anchor line the release would contain no application logic but still parse cleanly
+    if (-not $collect) {
+        Write-Error "Build failed: anchor line '# Helper to find XAML controls' not found in $appFile"
+        exit 1
+    }
 }
 
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText($OutputFile, $sb.ToString(), $utf8NoBom)
+# LF only: raw.githubusercontent.com serves the file as stored in git (LF), so the published SHA-256 must be of the LF bytes
+[System.IO.File]::WriteAllText($OutputFile, ($sb.ToString() -replace "`r`n", "`n"), $utf8NoBom)
+
+# Publish a checksum so users can verify the file they downloaded (see README "Quick Start")
+$hash = (Get-FileHash -Path $OutputFile -Algorithm SHA256).Hash.ToLower()
+[System.IO.File]::WriteAllText("$OutputFile.sha256", "$hash  diskman.ps1`n", $utf8NoBom)
+Write-Host "SHA-256: $hash" -ForegroundColor DarkGray
 
 $fileInfo = Get-Item $OutputFile
 Write-Host "Successfully built: $($fileInfo.FullName)" -ForegroundColor Green

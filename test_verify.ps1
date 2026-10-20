@@ -22,7 +22,7 @@ function Assert-Test {
 }
 
 # 1. Test Modules Ingestion
-Write-Host "`n[1/7] Testing Module Ingestion..." -ForegroundColor Yellow
+Write-Host "`n[1/8] Testing Module Ingestion..." -ForegroundColor Yellow
 . (Join-Path $ScriptDir "src\modules\00-Utils.ps1")
 . (Join-Path $ScriptDir "src\modules\Get-DriveMetrics.ps1")
 . (Join-Path $ScriptDir "src\modules\Start-FolderScan.ps1")
@@ -32,7 +32,7 @@ Write-Host "`n[1/7] Testing Module Ingestion..." -ForegroundColor Yellow
 Assert-Test "Module Ingestion" $true "All 6 modules loaded successfully."
 
 # 2. Test Path Safety Engine (Comprehensive Safety Matrix)
-Write-Host "`n[2/7] Running System Servicing & Path Safety Guard Unit Tests..." -ForegroundColor Yellow
+Write-Host "`n[2/8] Running System Servicing & Path Safety Guard Unit Tests..." -ForegroundColor Yellow
 
 $sysRoot = if ($env:SystemRoot) { $env:SystemRoot } else { "C:\Windows" }
 $sysDrive = if ($env:SystemDrive) { $env:SystemDrive } else { "C:" }
@@ -137,23 +137,7 @@ $resCookies = Test-PathSafety -Path (Join-Path $userProfile "AppData\Local\Googl
 Assert-Test "Protect Chrome Cookies" (-not $resCookies.Safe) $resCookies.Reason
 
 # 3. Test Windows Servicing State Detector (Detailed Scenarios)
-Write-Host "`n[3/7] Testing Indicator-Based Windows Servicing & Reboot Detection..." -ForegroundColor Yellow
-
-# A & B: Running service alone without active indicators does not cause Active servicing
-$liveServicing = Test-WindowsServicingActive
-Assert-Test "Live Servicing Check returns valid structured result" ($liveServicing.ContainsKey('IsActive') -and $liveServicing.ContainsKey('Status')) "Status: $($liveServicing.Status), IsActive=$($liveServicing.IsActive)"
-
-# If services like wuauserv are running on this machine, verify it does not mark active without indicators
-$wuauservRunning = $false
-try {
-    $s = Get-Service -Name "wuauserv" -ErrorAction SilentlyContinue
-    if ($s -and $s.Status -eq 'Running') { $wuauservRunning = $true }
-} catch {}
-if ($wuauservRunning -and -not (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending")) {
-    Assert-Test "wuauserv Running alone does NOT mark servicing active" (-not $liveServicing.IsActive -or $liveServicing.Status -eq 'ACTIVE') "Status: $($liveServicing.Status)"
-} else {
-    Assert-Test "Service status evaluated via indicator model" $true "Indicator-based verification active"
-}
+Write-Host "`n[3/8] Testing Indicator-Based Windows Servicing & Reboot Detection..." -ForegroundColor Yellow
 
 # C: Active BITS transfer causes servicing-active
 $bitsMock = Test-WindowsServicingActive -MockOverrides @{ ActiveBits = $true }
@@ -176,7 +160,7 @@ $unknownMock = Test-WindowsServicingActive -MockOverrides @{ ForceUnknown = $tru
 Assert-Test "Unknown servicing state fails closed" ($unknownMock.IsActive -eq $true -and $unknownMock.Status -eq "UNKNOWN") "Reason: $($unknownMock.Reason)"
 
 # 4. Test Reparse Point Fail-Closed Semantics & Safe Traversal
-Write-Host "`n[4/7] Testing Reparse Point Fail-Closed Semantics & Isolation..." -ForegroundColor Yellow
+Write-Host "`n[4/8] Testing Reparse Point Fail-Closed Semantics & Isolation..." -ForegroundColor Yellow
 
 # H: Reparse inspection failure fails closed
 $reparseEmpty = Test-ReparsePoint -Path ""
@@ -211,26 +195,8 @@ try {
         # Verify Get-FolderSizeFast does not count contents across junction
         $sizeResult = Get-FolderSizeFast -Path $realFolder
         Assert-Test "Get-FolderSizeFast does NOT traverse into junction" ($sizeResult.FileCount -eq 1) "File count in RealFolder: $($sizeResult.FileCount) (Expected 1)"
-
-        # Verify Get-CleanableCategoryFiles does not traverse into junction
-        # Simulate category inspection by running queue search logic on $realFolder
-        $queueTest = New-Object System.Collections.Generic.Queue[string]
-        $queueTest.Enqueue($realFolder)
-        $discoveredFiles = @()
-        while ($queueTest.Count -gt 0) {
-            $curr = $queueTest.Dequeue()
-            $d = New-Object System.IO.DirectoryInfo($curr)
-            foreach ($f in $d.EnumerateFiles()) { $discoveredFiles += $f.FullName }
-            foreach ($sub in $d.EnumerateDirectories()) {
-                $chk = Test-ReparsePoint -Path $sub.FullName
-                if (-not $chk.Success -or $chk.IsReparsePoint) { continue }
-                $queueTest.Enqueue($sub.FullName)
-            }
-        }
-        $traversedOutside = ($discoveredFiles | Where-Object { $_ -like "*outside_secret*" }).Count -gt 0
-        Assert-Test "Inspector queue traversal skips junction without following" (-not $traversedOutside) "Discovered files: $($discoveredFiles.Count)"
     } else {
-        Assert-Test "Simulated junction test" $true "mklink requires elevation/unsupported on environment; validated via logic"
+        Assert-Test "Junction could be created for the reparse test" $false "mklink /J failed: $cmdOutput"
     }
 } finally {
     if (Test-Path -LiteralPath $testTempRoot) {
@@ -244,7 +210,7 @@ try {
 }
 
 # 5. Test Target Definitions & Safety Classifications
-Write-Host "`n[5/7] Auditing All Cleanable Target Safety Classifications..." -ForegroundColor Yellow
+Write-Host "`n[5/8] Auditing All Cleanable Target Safety Classifications..." -ForegroundColor Yellow
 $targets = Get-CleanableTargets
 Assert-Test "Retrieved $($targets.Count) cleanable target definitions" ($targets.Count -ge 30)
 
@@ -269,13 +235,13 @@ Assert-Test "Shader Cache is classified as Safe" ($dxCacheTarget.SafetyLevel -eq
 
 # Comprehensive Explanation & Safety Audit across ALL cleanable targets
 $missingWhatDeleted = @($targets | Where-Object { [string]::IsNullOrWhiteSpace($_.WhatGetsDeleted) })
-Assert-Test "All 36 targets define accurate 'WhatGetsDeleted' explanations" ($missingWhatDeleted.Count -eq 0) "Missing count: $($missingWhatDeleted.Count)"
+Assert-Test "All targets define accurate 'WhatGetsDeleted' explanations" ($missingWhatDeleted.Count -eq 0) "Missing count: $($missingWhatDeleted.Count)"
 
 $missingSafetyExp = @($targets | Where-Object { [string]::IsNullOrWhiteSpace($_.SafetyExplanation) })
-Assert-Test "All 36 targets define detailed 'SafetyExplanation' rationale" ($missingSafetyExp.Count -eq 0) "Missing count: $($missingSafetyExp.Count)"
+Assert-Test "All targets define detailed 'SafetyExplanation' rationale" ($missingSafetyExp.Count -eq 0) "Missing count: $($missingSafetyExp.Count)"
 
 $missingConsequences = @($targets | Where-Object { [string]::IsNullOrWhiteSpace($_.Consequences) })
-Assert-Test "All 36 targets define clear 'Consequences' post-deletion behavior" ($missingConsequences.Count -eq 0) "Missing count: $($missingConsequences.Count)"
+Assert-Test "All targets define clear 'Consequences' post-deletion behavior" ($missingConsequences.Count -eq 0) "Missing count: $($missingConsequences.Count)"
 
 $invalidSafetyLevels = @($targets | Where-Object { $_.SafetyLevel -notin @('Safe', 'Optional', 'Advanced') })
 Assert-Test "All targets conform to strict 3-tier Safety taxonomy ('Safe', 'Optional', 'Advanced')" ($invalidSafetyLevels.Count -eq 0) "Invalid count: $($invalidSafetyLevels.Count)"
@@ -285,7 +251,7 @@ Assert-Test "All targets define valid uppercase SafetyBadges" ($invalidSafetyBad
 
 
 # 6. Test C: Drive Scanner & File Inspection
-Write-Host "`n[6/7] Testing C: Drive Junk Scanner & Shell Functions..." -ForegroundColor Yellow
+Write-Host "`n[6/8] Testing C: Drive Junk Scanner & Shell Functions..." -ForegroundColor Yellow
 $junkItems = Scan-SmartCleanupItems
 Assert-Test "Scan-SmartCleanupItems executed successfully" ($junkItems.Count -gt 0) "Scanned $($junkItems.Count) categories."
 
@@ -309,7 +275,8 @@ foreach ($fn in $functions) {
 }
 
 # Test Find-LargeFiles AI & Incomplete Download Classification
-$hunterTestDir = Join-Path ([System.IO.Path]::GetTempPath()) ("Diskman_HuntTest_" + [System.Guid]::NewGuid().ToString("N"))
+# Outside AppData on purpose: the single-file gate never offers files from there
+$hunterTestDir = Join-Path $env:PUBLIC ("Diskman_HuntTest_" + [System.Guid]::NewGuid().ToString("N"))
 try {
     New-Item -Path $hunterTestDir -ItemType Directory -Force | Out-Null
     
@@ -338,8 +305,132 @@ try {
     }
 }
 
-# 7. Standalone Compilation & Release AST Parsing
-Write-Host "`n[7/7] Compiling Standalone Distribution Bundle & Syntax Verification..." -ForegroundColor Yellow
+# 7. Sandbox deletion, Hunter gating, and background-worker wiring
+Write-Host "`n[7/8] Testing real deletion in a sandbox, Hunter safety gate, and worker wiring..." -ForegroundColor Yellow
+
+# Hunter / single-file gate: user folders allowed, apps / VMs / WSL / OneDrive blocked, bulk gate unchanged
+$up = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile)
+$pf = if ($env:ProgramFiles) { $env:ProgramFiles } else { "C:\Program Files" }
+Assert-Test "Bulk gate still blocks Downloads" (-not (Test-PathSafety -Path "$up\Downloads\big.iso").Safe)
+Assert-Test "Single-file gate allows Downloads" ((Test-PathSafety -Path "$up\Downloads\big.iso" -SingleFile).Safe)
+Assert-Test "Single-file gate blocks Program Files contents" (-not (Test-PathSafety -Path "$pf\SomeGame\data.bin" -SingleFile).Safe)
+Assert-Test "Single-file gate blocks WSL distro disk (Packages\...\ext4.vhdx)" (-not (Test-PathSafety -Path "$up\AppData\Local\Packages\Distro\LocalState\ext4.vhdx" -SingleFile).Safe)
+Assert-Test "Single-file gate blocks per-user app installs (AppData\Local\Programs)" (-not (Test-PathSafety -Path "$up\AppData\Local\Programs\Microsoft VS Code\Code.exe" -SingleFile).Safe)
+Assert-Test "Single-file gate blocks Discord / Electron installs (AppData\Local\Discord)" (-not (Test-PathSafety -Path "$up\AppData\Local\Discord\app-1.0\Discord.exe" -SingleFile).Safe)
+Assert-Test "Single-file gate blocks hidden tool folders (.vscode\extensions)" (-not (Test-PathSafety -Path "$up\.vscode\extensions\x\native.exe" -SingleFile).Safe)
+Assert-Test "Single-file gate allows AI model stores (.ollama\models)" ((Test-PathSafety -Path "$up\.ollama\models\blobs\sha256-abc" -SingleFile).Safe)
+Assert-Test "Single-file gate blocks game libraries (SteamLibrary / steamapps)" (-not (Test-PathSafety -Path "C:\SteamLibrary\steamapps\common\G\game.pak" -SingleFile).Safe)
+Assert-Test "Single-file gate blocks VM folders (VirtualBox VMs)" (-not (Test-PathSafety -Path "$up\VirtualBox VMs\dev\dev.vdi" -SingleFile).Safe)
+Assert-Test "Single-file gate blocks Windows files" (-not (Test-PathSafety -Path "$sysRoot\System32\kernel32.dll" -SingleFile).Safe)
+Assert-Test "Bulk gate blocks 'OneDrive - Company' folders" (-not (Test-PathSafety -Path "$up\OneDrive - Contoso\a.zip").Safe)
+Assert-Test "Single-file gate blocks 'OneDrive - Company' folders" (-not (Test-PathSafety -Path "$up\OneDrive - Contoso\a.zip" -SingleFile).Safe)
+
+# Recycle Bin definition: real path (no stray backtick), never pre-selected
+$recycleTarget = $targets | Where-Object { $_.Id -eq 'RecycleBin' } | Select-Object -First 1
+Assert-Test "Recycle Bin path has no stray backtick" ($recycleTarget.Path -eq (Join-Path $sysDrive '$Recycle.Bin')) "Path: $($recycleTarget.Path)"
+Assert-Test "Recycle Bin is Optional and not Recommended" ($recycleTarget.SafetyLevel -eq 'Optional' -and -not $recycleTarget.Recommended)
+Assert-Test "Scan-SmartCleanupItems -Id scans only that target" (@(Scan-SmartCleanupItems -Id 'UserTemp').Count -eq 1)
+
+# Same function set the app copies into its background worker (read from app.ps1 so the two cannot drift)
+$appText = Get-Content -Path (Join-Path $ScriptDir "src\app.ps1") -Raw
+$workerBlock = [regex]::Match($appText, '\$workerFunctions\s*=\s*@\(([\s\S]*?)\)').Groups[1].Value
+$workerFns = @([regex]::Matches($workerBlock, "'([\w-]+)'") | ForEach-Object { $_.Groups[1].Value })
+$missingFns = @($workerFns | Where-Object { -not (Get-Command -Name $_ -CommandType Function -ErrorAction SilentlyContinue) })
+Assert-Test "Every worker function exists in the modules" ($workerFns.Count -gt 0 -and $missingFns.Count -eq 0) "Missing: $($missingFns -join ', ')"
+
+function Invoke-InWorker {
+    param([string]$Script, [hashtable]$Vars = @{})
+    $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    foreach ($fn in $workerFns) {
+        $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry($fn, (Get-Command $fn -CommandType Function).Definition)))
+    }
+    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($iss)
+    $rs.Open()
+    foreach ($k in $Vars.Keys) { $rs.SessionStateProxy.SetVariable($k, $Vars[$k]) }
+    $ps = [PowerShell]::Create()
+    $ps.Runspace = $rs
+    $null = $ps.AddScript($Script)
+    try { return @($ps.Invoke()) } finally { $ps.Dispose(); $rs.Dispose() }
+}
+
+$workerScan = Invoke-InWorker -Script 'Scan-SmartCleanupItems -Id "UserTemp"'
+Assert-Test "Worker runspace can scan (all dependencies present)" (@($workerScan).Count -eq 1 -and $workerScan[0].Id -eq 'UserTemp')
+
+# Sandbox: a fake cleanup target with a nested junction, a read-only file, a subfolder and a locked file
+$sandbox = Join-Path ([System.IO.Path]::GetTempPath()) "Diskman_CleanTest_$([System.Guid]::NewGuid().ToString('N'))"
+$lockStream = $null
+try {
+    $outside  = Join-Path $sandbox "outside"
+    $cache    = Join-Path $sandbox "cache"
+    $linkRoot = Join-Path $sandbox "linked_root"
+    New-Item -ItemType Directory -Path $outside, $cache, (Join-Path $cache "sub") -Force | Out-Null
+    Set-Content -Path (Join-Path $outside "outside_secret.txt") -Value "must survive"
+    Set-Content -Path (Join-Path $cache "a.tmp") -Value "junk"
+    Set-Content -Path (Join-Path $cache "sub\b.tmp") -Value "junk"
+    Set-Content -Path (Join-Path $cache "ro.tmp") -Value "junk"
+    Set-ItemProperty -Path (Join-Path $cache "ro.tmp") -Name IsReadOnly -Value $true
+    $lockStream = [System.IO.File]::Open((Join-Path $cache "locked.tmp"), 'Create', 'ReadWrite', 'None')
+    cmd /c "mklink /J `"$(Join-Path $cache 'link')`" `"$outside`"" | Out-Null
+    cmd /c "mklink /J `"$linkRoot`" `"$outside`"" | Out-Null
+
+    $sizeInside = Get-FolderSizeFast -Path $cache
+    Assert-Test "Get-FolderSizeFast does not count through the junction" ($sizeInside.FileCount -eq 4) "Files: $($sizeInside.FileCount) (expected 4: a.tmp, b.tmp, ro.tmp, locked.tmp)"
+    $sizeLink = Get-FolderSizeFast -Path $linkRoot
+    Assert-Test "A target that is itself a junction is sized as empty" ($sizeLink.IsLink -eq $true -and $sizeLink.RawBytes -eq 0)
+
+    $makeItem = {
+        param($path)
+        $stats = Get-FolderSizeFast -Path $path
+        [PSCustomObject]@{ Id = 'SandboxTest'; CategoryName = 'Sandbox'; Target = $path; Type = 'DirectoryContents'
+            IsSelected = $true; RequiresAdmin = $false; RawBytes = [long]$stats.RawBytes; RawCount = [int]$stats.FileCount
+            DisplaySize = Format-Bytes -Bytes $stats.RawBytes; FileCount = "$($stats.FileCount) items" }
+    }
+
+    $res = Invoke-InWorker -Script 'Invoke-ExecuteCleanup -SelectedItems @($Item)' -Vars @{ Item = (& $makeItem $cache) } | Select-Object -Last 1
+    Assert-Test "Cleanup left the file behind the nested junction untouched" (Test-Path -LiteralPath (Join-Path $outside "outside_secret.txt"))
+    $deletedAll = (-not (Test-Path -LiteralPath (Join-Path $cache "a.tmp"))) -and (-not (Test-Path -LiteralPath (Join-Path $cache "ro.tmp"))) -and (-not (Test-Path -LiteralPath (Join-Path $cache "sub")))
+    Assert-Test "Cleanup deleted plain, read-only and nested files" $deletedAll
+    Assert-Test "Cleanup skipped the locked file instead of failing" (Test-Path -LiteralPath (Join-Path $cache "locked.tmp"))
+    Assert-Test "Cleanup reports freed bytes from a measurement (above 0, never above what the scan saw)" ($res.TotalFreedBytes -gt 0 -and $res.TotalFreedBytes -le $sizeInside.RawBytes) "Freed: $($res.DisplayFreed)"
+
+    # The exact worker script the app uses ($cleanupWork in app.ps1): progress lines must cross from the worker to the UI queue
+    $cleanupScript = [regex]::Match($appText, '\$cleanupWork = \{([\s\S]*?)\n\}').Groups[1].Value
+    Assert-Test "Found the app's worker cleanup script" ($cleanupScript -match 'Invoke-ExecuteCleanup')
+    $cache2 = Join-Path $sandbox "cache2"
+    New-Item -ItemType Directory -Path (Join-Path $cache2 "sub") -Force | Out-Null
+    Set-Content -Path (Join-Path $cache2 "x.tmp") -Value "junk"
+    Set-Content -Path (Join-Path $cache2 "sub\y.tmp") -Value "junk"
+    $logQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+    $res3 = Invoke-InWorker -Script $cleanupScript -Vars @{ LogQueue = $logQueue; TargetId = $null; Items = @(& $makeItem $cache2) } | Select-Object -Last 1
+    $queued = @(); $line = $null
+    while ($logQueue.TryDequeue([ref]$line)) { $queued += , $line }
+    Assert-Test "Worker progress reaches the UI queue" (@($queued | Where-Object { $_[0] -like 'Purged Sandbox*' }).Count -eq 1) "Queued lines: $($queued.Count)"
+    Assert-Test "Worker cleanup removed the files and reports freed bytes" ((-not (Test-Path -LiteralPath (Join-Path $cache2 "x.tmp"))) -and $res3.TotalFreedBytes -gt 0)
+
+    $res2 = Invoke-InWorker -Script 'Invoke-ExecuteCleanup -SelectedItems @($Item)' -Vars @{ Item = (& $makeItem $linkRoot) } | Select-Object -Last 1
+    Assert-Test "Cleanup refuses a target that is itself a junction" ((Test-Path -LiteralPath (Join-Path $outside "outside_secret.txt")) -and $res2.DeletedCount -eq 0)
+} finally {
+    if ($lockStream) { $lockStream.Dispose() }
+    foreach ($j in @((Join-Path $sandbox "cache\link"), (Join-Path $sandbox "linked_root"))) {
+        if (Test-Path -LiteralPath $j) { try { [System.IO.Directory]::Delete($j, $false) } catch {} }
+    }
+    if (Test-Path -LiteralPath $sandbox) { Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# GUI wiring: every control app.ps1 looks up must exist in the XAML (a typo would otherwise only show at click time)
+if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA') {
+    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml -ErrorAction SilentlyContinue
+    [xml]$xamlDoc = Get-Content -Path (Join-Path $ScriptDir "src\xaml\MainWindow.xaml") -Raw
+    $testWindow = [System.Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xamlDoc))
+    $controlNames = @([regex]::Matches($appText, 'Find-Control\s+"(\w+)"') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    $missingControls = @($controlNames | Where-Object { -not $testWindow.FindName($_) })
+    Assert-Test "XAML loads and all $($controlNames.Count) controls used by app.ps1 exist" ($controlNames.Count -gt 0 -and $missingControls.Count -eq 0) "Missing: $($missingControls -join ', ')"
+} else {
+    Write-Host "  [SKIP] GUI wiring check needs an STA host (run with powershell -STA)" -ForegroundColor DarkYellow
+}
+
+# 8. Standalone Compilation & Release AST Parsing
+Write-Host "`n[8/8] Compiling Standalone Distribution Bundle & Syntax Verification..." -ForegroundColor Yellow
 & (Join-Path $ScriptDir "Compile.ps1")
 
 $releaseFile = Join-Path $ScriptDir "release\diskman.ps1"

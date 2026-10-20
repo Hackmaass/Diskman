@@ -266,7 +266,11 @@ function Test-PathSafety {
         [Parameter(Mandatory = $true)]
         [AllowEmptyString()]
         [AllowNull()]
-        [string]$Path
+        [string]$Path,
+
+        # Single-file actions (Large Files Hunter) may touch user folders such as Downloads,
+        # but get extra blocks for application, VM and WSL data. Bulk cleanup never sets this.
+        [switch]$SingleFile
     )
 
     # Fail Closed: Check null, empty or whitespace
@@ -463,9 +467,45 @@ function Test-PathSafety {
             (Join-Path $userProfile "OneDrive")
         )
 
-        foreach ($uFolder in $blockedUserFolders) {
-            if (Test-IsSubpathOrEqual -Candidate $normalized -Parent $uFolder) {
-                return @{ Safe = $false; Reason = "Path is a protected user personal data directory ($uFolder)." }
+        if (-not $SingleFile) {
+            foreach ($uFolder in $blockedUserFolders) {
+                if (Test-IsSubpathOrEqual -Candidate $normalized -Parent $uFolder) {
+                    return @{ Safe = $false; Reason = "Path is a protected user personal data directory ($uFolder)." }
+                }
+            }
+        }
+
+        # Cloud-synced folders ("OneDrive", "OneDrive - Contoso"): deleting here deletes in the cloud too
+        $oneDrivePattern = [System.Management.Automation.WildcardPattern]::Escape($userProfile) + '\OneDrive*'
+        if ($normalized -ilike $oneDrivePattern) {
+            return @{ Safe = $false; Reason = "Path is inside a OneDrive synced folder." }
+        }
+
+        # -------------------------------------------------------------
+        # 9. Single-file actions: block installed apps and VM / WSL / Docker data
+        # -------------------------------------------------------------
+        if ($SingleFile) {
+            foreach ($blocked in @($progFiles, $progFilesX86, $progData)) {
+                if (Test-IsSubpathOrEqual -Candidate $normalized -Parent $blocked) {
+                    return @{ Safe = $false; Reason = "Installed application data ($blocked) cannot be deleted from here." }
+                }
+            }
+
+            # Per-user installs (VS Code, Discord, Docker Desktop, WSL distros, VM bundles...) live under AppData and
+            # hidden tool folders such as .vscode or .codex; only the AI model stores below are fair game.
+            if ($normalized.StartsWith($userProfile + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+                $relative = $normalized.Substring($userProfile.Length + 1)
+                if ($relative -match '^AppData(\\|$)') {
+                    return @{ Safe = $false; Reason = "AppData holds installed apps, WSL distros and VM disks; use the Cleaner tab for its caches." }
+                }
+                if ($relative -match '^\.(?!(ollama|cache|lmstudio)(\\|$))') {
+                    return @{ Safe = $false; Reason = "Hidden tool folder in the user profile ($($relative.Split('\')[0])) is not offered for deletion." }
+                }
+            }
+
+            # Game libraries and VM folders anywhere on the drive
+            if ($normalized -match '\\(steamapps|SteamLibrary|Epic Games|XboxGames|WindowsApps|GOG Games|VirtualBox VMs|Virtual Machines|Virtual hard disks|Hyper-V)(\\|$)') {
+                return @{ Safe = $false; Reason = "Game library or virtual machine folder is not offered for deletion." }
             }
         }
 

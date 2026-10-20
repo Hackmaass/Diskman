@@ -21,7 +21,7 @@ function Find-LargeFiles {
         return @()
     }
 
-    $results = @()
+    $results = New-Object System.Collections.Generic.List[object]
 
     $installerExt = @(".exe", ".msi", ".pkg", ".appinstaller", ".cab", ".msu")
     $diskExt      = @(".iso", ".vhd", ".vhdx", ".img", ".vmdk", ".qcow2", ".wim")
@@ -33,6 +33,9 @@ function Find-LargeFiles {
     $partExt      = @(".part", ".crdownload", ".download", ".partial")
 
     $sysRoot = if ($env:SystemRoot) { $env:SystemRoot.TrimEnd('\', '/') } else { "C:\Windows" }
+    $progFiles = if ($env:ProgramFiles) { $env:ProgramFiles.TrimEnd('\', '/') } else { "C:\Program Files" }
+    $progFilesX86 = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)}.TrimEnd('\', '/') } else { "C:\Program Files (x86)" }
+    $progData = if ($env:ProgramData) { $env:ProgramData.TrimEnd('\', '/') } else { "C:\ProgramData" }
     $userProfile = if ($env:USERPROFILE) { $env:USERPROFILE.TrimEnd('\', '/') } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile).TrimEnd('\', '/') }
     $usersRoot = [System.IO.Path]::GetDirectoryName($userProfile)
     if ([string]::IsNullOrWhiteSpace($usersRoot)) { $usersRoot = "C:\Users" }
@@ -63,6 +66,8 @@ function Find-LargeFiles {
             foreach ($sub in $rootInfo.EnumerateDirectories()) {
                 if ($sub.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
                 if ($sub.FullName -ieq $usersRoot -or $sub.FullName -ieq $sysRoot) { continue }
+                # Installed apps and shared app data are never offered for deletion, so do not spend scan budget there
+                if ($sub.FullName -ieq $progFiles -or $sub.FullName -ieq $progFilesX86 -or $sub.FullName -ieq $progData) { continue }
                 if ($sub.Name -ieq "`$Recycle.Bin" -or $sub.Name -ieq "System Volume Information" -or $sub.Name -ieq "`$WinREAgent") { continue }
                 $dirQueue.Enqueue($sub.FullName)
             }
@@ -82,7 +87,8 @@ function Find-LargeFiles {
             continue
         }
 
-        if ($currentDir -match '\\\$RECYCLE\.BIN|\\System Volume Information|\\AppData\\Local\\Application Data|\\assembly') {
+        # Same exclusions as Test-PathSafety -SingleFile (which stays the authority); pruning here only saves scan time
+        if ($currentDir -match '\\\$RECYCLE\.BIN|\\System Volume Information|\\assembly|\\Users\\[^\\]+\\AppData$|\\Users\\[^\\]+\\\.(?!(ollama|cache|lmstudio)$)[^\\]+$|\\(steamapps|SteamLibrary|Epic Games|XboxGames|WindowsApps|GOG Games|VirtualBox VMs|Virtual Machines|Virtual hard disks|Hyper-V)$') {
             continue
         }
 
@@ -93,7 +99,7 @@ function Find-LargeFiles {
             foreach ($f in $dInfo.EnumerateFiles()) {
                 if ($f.Length -ge $MinSizeBytes) {
                     # Safety check on file: block critical OS files
-                    $safety = Test-PathSafety -Path $f.FullName
+                    $safety = Test-PathSafety -Path $f.FullName -SingleFile
                     if (-not $safety.Safe) { continue }
 
                     $ext = $f.Extension.ToLower()
@@ -122,7 +128,7 @@ function Find-LargeFiles {
                         ($CategoryFilter -eq "Incomplete / Temp Download" -and ($cat -like "*Incomplete*" -or $cat -like "*Download*")))
 
                     if ($matchesCat) {
-                        $results += [PSCustomObject]@{
+                        $results.Add([PSCustomObject]@{
                             Name          = $f.Name
                             FullPath      = $f.FullName
                             RawSize       = $f.Length
@@ -130,7 +136,7 @@ function Find-LargeFiles {
                             Category      = $cat
                             LastWriteTime = $f.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
                             Extension     = $ext
-                        }
+                        })
                     }
                 }
             }
@@ -148,10 +154,6 @@ function Find-LargeFiles {
             }
         } catch {
             continue
-        }
-
-        if ($results.Count -ge ($Limit * 2)) {
-            break
         }
     }
 

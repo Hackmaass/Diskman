@@ -17,7 +17,12 @@ if %errorLevel% neq 0 (
 )
 
 echo =====================================================================
-echo   DISKMAN - C: DRIVE STORAGE CLEANER ^& JUNK PURGER (Elevated Admin)
+net session >nul 2>&1
+if %errorLevel% equ 0 (
+    echo   DISKMAN - C: DRIVE STORAGE CLEANER ^& JUNK PURGER ^(Elevated Admin^)
+) else (
+    echo   DISKMAN - C: DRIVE STORAGE CLEANER ^& JUNK PURGER ^(Standard User^)
+)
 echo   Real-time activity and deletion logs will stream live below.
 echo =====================================================================
 echo.

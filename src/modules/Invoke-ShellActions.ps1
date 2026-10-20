@@ -43,7 +43,10 @@ function Send-ItemToRecycleBin {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        # Large Files Hunter only: allow user folders such as Downloads (apps, VM and WSL data stay blocked)
+        [switch]$SingleFile
     )
 
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -51,7 +54,7 @@ function Send-ItemToRecycleBin {
     }
 
     # Strict multi-layer safety check
-    $safety = Test-PathSafety -Path $Path
+    $safety = Test-PathSafety -Path $Path -SingleFile:$SingleFile
     if (-not $safety.Safe) {
         return @{ Success = $false; Message = "Protected Path: $($safety.Reason)" }
     }
@@ -80,7 +83,10 @@ function Remove-ItemPermanently {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        # Large Files Hunter only: allow user folders such as Downloads (apps, VM and WSL data stay blocked)
+        [switch]$SingleFile
     )
 
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -88,7 +94,7 @@ function Remove-ItemPermanently {
     }
 
     # Strict multi-layer safety check
-    $safety = Test-PathSafety -Path $Path
+    $safety = Test-PathSafety -Path $Path -SingleFile:$SingleFile
     if (-not $safety.Safe) {
         return @{ Success = $false; Message = "Action Blocked: $($safety.Reason)" }
     }
