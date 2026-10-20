@@ -66,7 +66,11 @@ Diskman/
 │   │   ├── Invoke-SmartCleanup.ps1  # Target catalogue, category scanner, and purge routines
 │   │   ├── Invoke-ShellActions.ps1  # Windows File Explorer reveal and Recycle Bin helpers
 │   │   ├── Find-LargeFiles.ps1      # Large file search and classification engine
-│   │   └── Start-FolderScan.ps1     # High-speed directory analyzer and drilldown
+│   │   ├── Find-AppCaches.ps1       # Detects app cache folders by structure (browsers, Electron, VS Code family)
+│   │   ├── Invoke-DiskCompact.ps1   # Finds registered Docker/WSL disks and compacts them (admin)
+│   │   ├── Scan-DriveTree.ps1       # One-pass size tree, accounting, biggest folders
+│   │   ├── Get-SpaceRules.ps1       # Folder rules (verdict + advice) and the command allow-list
+│   │   └── Get-SystemSpace.ps1      # Windows-managed space panel data
 │   ├── xaml/
 │   │   └── MainWindow.xaml          # Modern Dark WPF GUI markup (Fluent-inspired layout)
 │   └── app.ps1                      # Development bootstrapper and UI event controller
@@ -192,3 +196,37 @@ Looking for ideas on what to contribute? Here are some high-impact areas:
 ## Code of Conduct
 
 Please note that this project is governed by our [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code.
+
+
+## Adding advice for a big folder (Space Analyzer rules)
+
+Open `src/modules/Get-SpaceRules.ps1` and add one `& $add <path> <title> <what> <verdict> <safety> <extra>` line.
+
+- Paths match scanned folders **exactly** (never by pattern), so target the specific folder.
+- Verdicts: `Clean` (only for paths verified on a real machine; add the target to `Get-CleanableTargets` instead, rules are generated from it), `Command` (needs an entry in `Get-AllowedCommands` with exact arguments and a consent text that names side effects), `Uninstall`, `Review`, `System`.
+- If you could not verify that deleting is safe, the verdict is `Review`. `Review` never has a delete button.
+- Add a test in `test_verify.ps1` section 8 for any new `Command` or `Clean` rule.
+
+## Teaching the detector a new cache layout
+
+Open `Get-AppCacheKind` in `src/modules/Find-AppCaches.ps1` and add one `switch` branch.
+
+- Match on **structure**, not name: require a file or subfolder that only that kind of cache has (for example `Cache_Data\index`).
+- Return `Safe` only for caches an app rebuilds silently; return `Optional` when the folder can hold data a user might miss (for example service worker caches).
+- Never widen `Test-AppCacheExcluded`'s exclusions (Claude-Data, Packages, fixed targets) to make a case pass.
+- Add a fake layout and a decoy to the sandbox test in `test_verify.ps1` section 8b.
+
+## Dry run: never execute allow-listed commands while testing
+
+Set `DISKMAN_DRY_RUN=1` and every allow-listed command (`Invoke-AllowedCommand`, `Invoke-VhdCompact`) validates its input and then only *reports* what it would run. `test_verify.ps1` and `tools\Invoke-GuiSmoke.ps1` set it themselves, so running them from an elevated prompt can never turn hibernation off, compact a disk or delete a restore point.
+
+## Testing on another machine (elevated run)
+
+The author's machine is non-elevated, so the elevated path has never been observed. If you can, open PowerShell **as Administrator** and run:
+
+```powershell
+powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\test_verify.ps1
+powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\tools\Invoke-GuiSmoke.ps1
+```
+
+Both only change sandbox folders under `%PUBLIC%` and `%LOCALAPPDATA%`. Please share the end of the test output and the `summary.txt` the smoke tool prints (look for the accounted-for percentage and whether the shadow copy size was measured).

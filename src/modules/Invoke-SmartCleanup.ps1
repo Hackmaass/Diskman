@@ -79,12 +79,13 @@ function Get-CleanableTargets {
             Path              = $userTempPath
             Description       = 'Temporary application and cache files created by running user programs'
             WhatGetsDeleted   = 'Temporary session files, scratch buffers, installer extractors, and ephemeral .tmp files in %LOCALAPPDATA%\Temp.'
-            SafetyExplanation = 'Safe: Temporary scratch space used by running programs. Files actively locked by open processes are automatically skipped. User documents, personal files, and program installations are never stored here.'
+            SafetyExplanation = 'Safe: Temporary scratch space used by running programs. Files actively locked by open processes are automatically skipped, and anything changed in the last 24 hours is kept (an installer or app may still be using it). User documents, personal files, and program installations are never stored here.'
             Consequences      = 'None. Running applications will automatically create fresh temporary files during future sessions as needed.'
             SafetyBadge       = 'SAFE'
             Type              = 'DirectoryContents'
             SafetyLevel       = 'Safe'
             Recommended       = $true
+            MinAgeHours       = 24
             RequiresAdmin     = $false
         },
         @{
@@ -95,12 +96,13 @@ function Get-CleanableTargets {
             Path              = (Join-Path $sysRoot 'Temp')
             Description       = 'Operating system temporary cache files and service leftovers'
             WhatGetsDeleted   = 'Operating system service scratch files, driver extraction folders, and background installer leftovers in C:\Windows\Temp.'
-            SafetyExplanation = 'Safe (Admin): Temporary files discarded by completed Windows updates and service installations. Active Windows kernel/service files are locked and skipped.'
+            SafetyExplanation = 'Safe (Admin): Temporary files discarded by completed Windows updates and service installations. Active Windows kernel/service files are locked and skipped, and anything changed in the last 24 hours is kept.'
             Consequences      = 'None. System services and installers generate new temporary files when required.'
             SafetyBadge       = 'SAFE'
             Type              = 'DirectoryContents'
             SafetyLevel       = 'Safe'
             Recommended       = $true
+            MinAgeHours       = 24
             RequiresAdmin     = $true
         },
         @{
@@ -428,15 +430,47 @@ function Get-CleanableTargets {
             Group             = 'Developer Caches'
             Category          = 'Node.js NPM Cache'
             Icon              = '[NPM]'
-            Path              = (Join-Path $appData 'npm-cache')
+            Path              = (Join-Path $localAppData 'npm-cache\_cacache')
             Description       = 'Global Node Package Manager download cache'
-            WhatGetsDeleted   = 'Global tarball archives cached by npm in %APPDATA%\npm-cache.'
+            WhatGetsDeleted   = 'Global tarball archives cached by npm in %LOCALAPPDATA%\npm-cache\_cacache.'
             SafetyExplanation = 'Safe: Duplicate package download archives. Project node_modules, package.json, and global binaries are untouched.'
             Consequences      = 'Future npm install for previously cached packages will re-download tarballs from the npm registry.'
             SafetyBadge       = 'SAFE'
             Type              = 'DirectoryContents'
             SafetyLevel       = 'Safe'
             Recommended       = $true
+            RequiresAdmin     = $false
+        },
+        @{
+            Id                = 'NpmNpxCache'
+            Group             = 'Developer Caches'
+            Category          = 'npx Package Cache'
+            Icon              = '[NPX]'
+            Path              = (Join-Path $localAppData 'npm-cache\_npx')
+            Description       = 'Packages that npx downloaded to run (often MCP servers and CLI tools)'
+            WhatGetsDeleted   = 'Packages npx installed to run commands, in %LOCALAPPDATA%\npm-cache\_npx.'
+            SafetyExplanation = 'Optional: npx re-downloads what it needs. But tools started through npx (for example MCP servers) run their code from this folder, so close them first or they can fail until restarted.'
+            Consequences      = 'The next npx command downloads its package again. A tool that is running right now may crash if its files disappear.'
+            SafetyBadge       = 'OPTIONAL'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Optional'
+            Recommended       = $false
+            RequiresAdmin     = $false
+        },
+        @{
+            Id                = 'ElectronCache'
+            Group             = 'Developer Caches'
+            Category          = 'Electron Download Cache'
+            Icon              = '[ELECTRON]'
+            Path              = (Join-Path $localAppData 'electron\Cache')
+            Description       = 'Electron runtime downloads cached by npm tools that build desktop apps'
+            WhatGetsDeleted   = 'Cached Electron binaries and checksums in %LOCALAPPDATA%\electron\Cache.'
+            SafetyExplanation = 'Optional: Download copies. Installed apps and project files are not touched.'
+            Consequences      = 'The next build that needs Electron downloads it again (about 100-130 MB per version).'
+            SafetyBadge       = 'OPTIONAL'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Optional'
+            Recommended       = $false
             RequiresAdmin     = $false
         },
         @{
@@ -695,6 +729,9 @@ function Scan-SmartCleanupItems {
             Recommended       = [bool]$t.Recommended
             RequiresAdmin     = [bool]$t.RequiresAdmin
             IsSelected        = [bool]$isSelected
+            MinAgeHours       = [int]$t.MinAgeHours
+            CanSelect         = [bool](-not $t.RequiresAdmin -or $isAdminCurrent)
+            SelectTip         = if ($t.RequiresAdmin -and -not $isAdminCurrent) { 'Needs administrator. Use Restart as Administrator.' } else { 'Include in Clean Selected' }
             PathExists        = [bool]$pathExists
         }
     }
@@ -862,158 +899,169 @@ function Invoke-ExecuteCleanup {
             continue
         }
 
-        $targetPath = $item.Target
-        if (Test-Path -LiteralPath $targetPath) {
-            # Strict Safety Gate: Test-PathSafety is the final and absolute authority.
-            # No hardcoded exceptions or bypasses allowed.
-            $targetSafety = Test-PathSafety -Path $targetPath
-            if (-not $targetSafety.Safe) {
-                $msg = "BLOCKED: Target directory failed safety check: $($targetSafety.Reason)"
-                $logMessages += $msg
-                if ($null -ne $OnProgress) {
-                    & $OnProgress "  [X] $msg" "ERROR"
-                }
-                continue
-            }
-
-            # A target that is itself a junction/symlink points elsewhere (e.g. a cache moved to D:): never delete through it
-            if ((Test-ReparsePoint -Path $targetPath).IsReparsePoint) {
-                $msg = "SKIPPED $($item.CategoryName): $targetPath is a link to another location, so Diskman will not clean through it."
-                $logMessages += $msg
-                if ($null -ne $OnProgress) {
-                    & $OnProgress "  [!] $msg" "WARN"
-                }
-                continue
-            }
-
-            $initialCategoryBytes = [long]$item.RawBytes
-            $catFreedBytes = [long]0
-            $catDeletedCount = 0
-            $catSkippedCount = 0
-
-            try {
-                $itemsToClean = Get-ChildItem -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
-                $totalInCat = ($itemsToClean | Measure-Object).Count
-
-                foreach ($entry in $itemsToClean) {
-                    # Rigorous safety validation on every single child item
-                    $itemSafety = Test-PathSafety -Path $entry.FullName
-                    if (-not $itemSafety.Safe) {
-                        $catSkippedCount++
-                        if ($null -ne $OnProgress) {
-                            & $OnProgress "  [SAFETY GUARD] Skipped protected item: $($entry.Name) ($($itemSafety.Reason))" "WARN"
-                        }
-                        continue
+        $targetPaths = if ($item.Targets) { @($item.Targets) } else { @($item.Target) }
+        $multi = $targetPaths.Count -gt 1
+        foreach ($targetPath in $targetPaths) {
+            $label = if ($multi) { "$($item.CategoryName) ($(Split-Path -Path $targetPath -Leaf))" } else { $item.CategoryName }
+            if (Test-Path -LiteralPath $targetPath) {
+                # Strict Safety Gate: Test-PathSafety is the final and absolute authority.
+                # No hardcoded exceptions or bypasses allowed.
+                $targetSafety = Test-PathSafety -Path $targetPath
+                if (-not $targetSafety.Safe) {
+                    $msg = "BLOCKED: Target directory failed safety check: $($targetSafety.Reason)"
+                    $logMessages += $msg
+                    if ($null -ne $OnProgress) {
+                        & $OnProgress "  [X] $msg" "ERROR"
                     }
+                    continue
+                }
 
-                    $entryDeleted = $false
+                # A target that is itself a junction/symlink points elsewhere (e.g. a cache moved to D:): never delete through it
+                if ((Test-ReparsePoint -Path $targetPath).IsReparsePoint) {
+                    $msg = "SKIPPED ${label}: $targetPath is a link to another location, so Diskman will not clean through it."
+                    $logMessages += $msg
+                    if ($null -ne $OnProgress) {
+                        & $OnProgress "  [!] $msg" "WARN"
+                    }
+                    continue
+                }
 
-                    try {
-                        if ($entry.PSIsContainer) {
-                            # Detect Reparse Points / Junctions / Symbolic Links (Fail-Closed)
-                            $reparseCheck = Test-ReparsePoint -Path $entry.FullName
-                            if (-not $reparseCheck.Success) {
-                                # Unknown reparse state = do not delete
-                                $catSkippedCount++
-                                if ($null -ne $OnProgress) {
-                                    & $OnProgress "  [SAFETY GUARD] Skipped unverified reparse item: $($entry.Name) ($($reparseCheck.Reason))" "WARN"
-                                }
-                                continue
+                # One target keeps the scan's size; several (a detected app's cache folders) are measured per folder
+                $initialCategoryBytes = if ($multi) { [long](Get-FolderSizeFast -Path $targetPath).RawBytes } else { [long]$item.RawBytes }
+                $catFreedBytes = [long]0
+                $catDeletedCount = 0
+                $catSkippedCount = 0
+                $recentKept = 0
+                $ageFloor = if ($item.MinAgeHours) { (Get-Date).AddHours(-[int]$item.MinAgeHours) } else { $null }
+
+                try {
+                    $itemsToClean = Get-ChildItem -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
+                    $totalInCat = ($itemsToClean | Measure-Object).Count
+
+                    foreach ($entry in $itemsToClean) {
+                        # Recently changed entries may still be in use by an installer or app: keep them (Disk Cleanup does the same)
+                        if ($ageFloor -and $entry.LastWriteTime -gt $ageFloor) { $recentKept++; continue }
+
+                        # Rigorous safety validation on every single child item
+                        $itemSafety = Test-PathSafety -Path $entry.FullName
+                        if (-not $itemSafety.Safe) {
+                            $catSkippedCount++
+                            if ($null -ne $OnProgress) {
+                                & $OnProgress "  [SAFETY GUARD] Skipped protected item: $($entry.Name) ($($itemSafety.Reason))" "WARN"
                             }
+                            continue
+                        }
 
-                            if ($reparseCheck.IsReparsePoint) {
-                                # Delete only the link itself without recursive traversal
-                                try {
-                                    [System.IO.Directory]::Delete($entry.FullName, $false)
-                                    $entryDeleted = $true
-                                } catch {
-                                    $entryDeleted = $false
+                        $entryDeleted = $false
+
+                        try {
+                            if ($entry.PSIsContainer) {
+                                # Detect Reparse Points / Junctions / Symbolic Links (Fail-Closed)
+                                $reparseCheck = Test-ReparsePoint -Path $entry.FullName
+                                if (-not $reparseCheck.Success) {
+                                    # Unknown reparse state = do not delete
+                                    $catSkippedCount++
+                                    if ($null -ne $OnProgress) {
+                                        & $OnProgress "  [SAFETY GUARD] Skipped unverified reparse item: $($entry.Name) ($($reparseCheck.Reason))" "WARN"
+                                    }
+                                    continue
+                                }
+
+                                if ($reparseCheck.IsReparsePoint) {
+                                    # Delete only the link itself without recursive traversal
+                                    try {
+                                        [System.IO.Directory]::Delete($entry.FullName, $false)
+                                        $entryDeleted = $true
+                                    } catch {
+                                        $entryDeleted = $false
+                                    }
+                                } else {
+                                    try {
+                                        $attr = [System.IO.File]::GetAttributes($entry.FullName)
+                                        if ($attr -band [System.IO.FileAttributes]::ReadOnly) {
+                                            [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
+                                        }
+                                    } catch {}
+
+                                    try {
+                                        [System.IO.Directory]::Delete($entry.FullName, $true)
+                                        $entryDeleted = $true
+                                    } catch [System.UnauthorizedAccessException] {
+                                        $entryDeleted = $false
+                                    } catch {
+                                        try {
+                                            Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+                                            $entryDeleted = $true
+                                        } catch {
+                                            $entryDeleted = $false
+                                        }
+                                    }
                                 }
                             } else {
                                 try {
-                                    $attr = [System.IO.File]::GetAttributes($entry.FullName)
-                                    if ($attr -band [System.IO.FileAttributes]::ReadOnly) {
-                                        [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
-                                    }
+                                    [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
                                 } catch {}
 
                                 try {
-                                    [System.IO.Directory]::Delete($entry.FullName, $true)
+                                    [System.IO.File]::Delete($entry.FullName)
                                     $entryDeleted = $true
                                 } catch [System.UnauthorizedAccessException] {
                                     $entryDeleted = $false
                                 } catch {
                                     try {
-                                        Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+                                        Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
                                         $entryDeleted = $true
                                     } catch {
                                         $entryDeleted = $false
                                     }
                                 }
                             }
-                        } else {
-                            try {
-                                [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
-                            } catch {}
 
-                            try {
-                                [System.IO.File]::Delete($entry.FullName)
-                                $entryDeleted = $true
-                            } catch [System.UnauthorizedAccessException] {
-                                $entryDeleted = $false
-                            } catch {
-                                try {
-                                    Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
-                                    $entryDeleted = $true
-                                } catch {
-                                    $entryDeleted = $false
+                            if ($entryDeleted) {
+                                $catDeletedCount++
+
+                                if ($catDeletedCount % 5 -eq 0 -or $catDeletedCount -le 3 -or $catDeletedCount -eq $totalInCat) {
+                                    if ($null -ne $OnProgress) {
+                                        & $OnProgress "  [$catDeletedCount / $totalInCat] Cleaned: $($entry.Name)" "INFO"
+                                    }
                                 }
+                            } else {
+                                $catSkippedCount++
                             }
-                        }
-
-                        if ($entryDeleted) {
-                            $catDeletedCount++
-
-                            if ($catDeletedCount % 5 -eq 0 -or $catDeletedCount -le 3 -or $catDeletedCount -eq $totalInCat) {
-                                if ($null -ne $OnProgress) {
-                                    & $OnProgress "  [$catDeletedCount / $totalInCat] Cleaned: $($entry.Name)" "INFO"
-                                }
-                            }
-                        } else {
+                        } catch {
                             $catSkippedCount++
                         }
-                    } catch {
-                        $catSkippedCount++
+
                     }
 
-                }
+                    # Freed = what the scan saw minus what is still there now (never an estimate)
+                    $remaining = Get-FolderSizeFast -Path $targetPath
+                    $catFreedBytes = [math]::Max([long]0, $initialCategoryBytes - [long]$remaining.RawBytes)
 
-                # Freed = what the scan saw minus what is still there now (never an estimate)
-                $remaining = Get-FolderSizeFast -Path $targetPath
-                $catFreedBytes = [math]::Max([long]0, $initialCategoryBytes - [long]$remaining.RawBytes)
+                    $totalFreedBytes += $catFreedBytes
+                    $totalDeletedCount += $catDeletedCount
 
-                $totalFreedBytes += $catFreedBytes
-                $totalDeletedCount += $catDeletedCount
-
-                $freedFormatted = Format-Bytes -Bytes $catFreedBytes
-                $msg = "Purged $($item.CategoryName): Cleaned $catDeletedCount items (Freed $freedFormatted)"
-                if ($catSkippedCount -gt 0) {
-                    if (-not $isAdmin) {
-                        $msg += " [$catSkippedCount locked/in-use items skipped (run as Administrator to clean system items)]"
-                    } else {
-                        $msg += " [$catSkippedCount locked/protected items skipped]"
+                    $freedFormatted = Format-Bytes -Bytes $catFreedBytes
+                    $msg = "Purged ${label}: Cleaned $catDeletedCount items (Freed $freedFormatted)"
+                    if ($catSkippedCount -gt 0) {
+                        if (-not $isAdmin) {
+                            $msg += " [$catSkippedCount locked/in-use items skipped (run as Administrator to clean system items)]"
+                        } else {
+                            $msg += " [$catSkippedCount locked/protected items skipped]"
+                        }
                     }
-                }
 
-                $logMessages += $msg
-                if ($null -ne $OnProgress) {
-                    & $OnProgress $msg "SUCCESS"
-                }
-            } catch {
-                $msg = "Notice on $($item.CategoryName): $_"
-                $logMessages += $msg
-                if ($null -ne $OnProgress) {
-                    & $OnProgress $msg "WARN"
+                    if ($recentKept -gt 0) { $msg += " [$recentKept items changed in the last $($item.MinAgeHours) h were kept]" }
+                    $logMessages += $msg
+                    if ($null -ne $OnProgress) {
+                        & $OnProgress $msg "SUCCESS"
+                    }
+                } catch {
+                    $msg = "Notice on $($item.CategoryName): $_"
+                    $logMessages += $msg
+                    if ($null -ne $OnProgress) {
+                        & $OnProgress $msg "WARN"
+                    }
                 }
             }
         }

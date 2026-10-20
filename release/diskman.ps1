@@ -532,12 +532,171 @@ function Test-PathSafety {
 }
 
 
+# --- Module: Find-AppCaches.ps1 ---
+# Finds regenerable cache folders of the apps installed for this user (every browser profile, Electron apps, VS Code family).
+# Detection is by folder STRUCTURE, never by name alone: a bare "Cache" folder can be anything, but a folder that holds
+# Cache_Data\index is a Chromium HTTP cache. Anything not matching a signature stays out of the list (Review in the explorer).
+
+# Folders the detector must never offer, whatever their name
+function Test-AppCacheExcluded {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path, [string[]]$FixedTargetPaths = @())
+
+    $p = $Path.TrimEnd('\')
+    if ($p -match '\\Claude-Data(\\|$)') { return $true }                      # the Claude desktop app's own data
+    if ($p -match '\\AppData\\Local\\Packages(\\|$)') { return $true }          # Store apps: not offered in this version
+    if ($p -match '\\AppData\\Local\\Microsoft\\(Windows|WindowsApps)(\\|$)') { return $true }
+    foreach ($fixed in $FixedTargetPaths) {
+        if ($fixed -and (Test-IsSubpathOrEqual -Candidate $p -Parent $fixed)) { return $true }   # already a fixed target: never count twice
+    }
+    return $false
+}
+
+# Returns @{ Safety = 'Safe'|'Optional'; Kind = <text> } when the folder matches a known cache layout, else $null
+function Get-AppCacheKind {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $leaf = Split-Path -Path $Path -Leaf
+    $parent = Split-Path -Path $Path -Parent
+    $has = { param($rel) Test-Path -LiteralPath (Join-Path $Path $rel) }
+
+    switch -Regex ($leaf) {
+        '^Cache$' {
+            if ((& $has 'Cache_Data\index') -or ((& $has 'index') -and (& $has 'data_0'))) { return @{ Safety = 'Safe'; Kind = 'web cache' } }
+            return $null
+        }
+        '^(GPUCache|GrShaderCache|DawnCache|DawnGraphiteCache|DawnWebGPUCache)$' {
+            if ((& $has 'index') -or (& $has 'data_0')) { return @{ Safety = 'Safe'; Kind = 'GPU/shader cache' } }
+            return $null
+        }
+        '^Code Cache$' {
+            if ((& $has 'js') -or (& $has 'wasm')) { return @{ Safety = 'Safe'; Kind = 'compiled script cache' } }
+            return $null
+        }
+        '^CacheStorage$' {
+            # Progressive web apps keep offline data here, so this one is Optional
+            if ((Split-Path -Path $parent -Leaf) -eq 'Service Worker' -and (Test-Path -LiteralPath (Join-Path $parent 'Database'))) { return @{ Safety = 'Optional'; Kind = 'service worker cache' } }
+            return $null
+        }
+        '^(component_crx_cache|extensions_crx_cache)$' {
+            if (Test-Path -LiteralPath (Join-Path $parent 'Local State')) { return @{ Safety = 'Optional'; Kind = 'extension download cache' } }
+            return $null
+        }
+        '^Crashpad$' {
+            if ((& $has 'reports') -or (& $has 'metadata')) { return @{ Safety = 'Safe'; Kind = 'crash report database' } }
+            return $null
+        }
+        '^(CachedData|CachedProfilesData|logs)$' {
+            if (Test-Path -LiteralPath (Join-Path $parent 'User\settings.json')) { return @{ Safety = 'Safe'; Kind = 'editor cache/logs' } }
+            return $null
+        }
+        '^CachedExtensionVSIXs$' {
+            if (Test-Path -LiteralPath (Join-Path $parent 'User\settings.json')) { return @{ Safety = 'Optional'; Kind = 'downloaded extension packages' } }
+            return $null
+        }
+    }
+    return $null
+}
+
+# One group (= one Cleaner row) per app: the first one or two folders below AppData\Local or AppData\Roaming
+function Get-AppCacheGroupKey {
+    [CmdletBinding()]
+    param([string]$Path, [string]$LocalRoot, [string]$RoamingRoot)
+
+    foreach ($root in $LocalRoot, $RoamingRoot) {
+        if ($root -and $Path.StartsWith($root + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $parts = $Path.Substring($root.Length + 1).Split('\')
+            $takeTwo = $parts.Count -gt 2 -and $parts[0] -in @('Google', 'BraveSoftware', 'Microsoft', 'Mozilla', 'Programs', 'Opera Software', 'Vivaldi')
+            return $(if ($takeTwo) { "$($parts[0])\$($parts[1])" } else { $parts[0] })
+        }
+    }
+    return $null
+}
+
+function Find-AppCaches {
+    [CmdletBinding()]
+    # AppDataPath is a seam for tests: it replaces the user's AppData\Local and \Roaming as the place to search
+    param([Parameter(Mandatory = $true)] $Root, [long]$MinBytes = 5MB, [string]$AppDataPath = $null)
+
+    $profilePath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile).TrimEnd('\')
+    $local   = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData).TrimEnd('\')
+    $roaming = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ApplicationData).TrimEnd('\')
+    $searchRoot = "$profilePath\AppData"
+    if ($AppDataPath) { $searchRoot = $AppDataPath.TrimEnd('\'); $local = $searchRoot; $roaming = $searchRoot }
+    $appData = Find-TreeNode -Root $Root -Path $searchRoot
+    if ($null -eq $appData) { return @() }
+
+    $fixed = @(Get-CleanableTargets | ForEach-Object { $_.Path })
+    $accepted = New-Object System.Collections.Generic.List[object]
+
+    $visit = {
+        param($node)
+        foreach ($child in $node.Children) {
+            if ($child.Bytes -lt $MinBytes) { continue }
+            # Whole areas that are never offered: do not even walk into them
+            if ($child.Path -match '\\Claude-Data$|\\AppData\\Local\\Packages$') { continue }
+            $kind = Get-AppCacheKind -Path $child.Path
+            if ($kind) {
+                if (-not (Test-AppCacheExcluded -Path $child.Path -FixedTargetPaths $fixed)) {
+                    $key = Get-AppCacheGroupKey -Path $child.Path -LocalRoot $local -RoamingRoot $roaming
+                    if ($key) { $accepted.Add([PSCustomObject]@{ Node = $child; Kind = $kind.Kind; Safety = $kind.Safety; Key = $key }) }
+                }
+                continue            # the outermost match wins: never descend into a cache
+            }
+            & $visit $child
+        }
+    }
+    & $visit $appData
+
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($group in ($accepted | Group-Object -Property Key)) {
+        $nodes = @($group.Group)
+        $bytes = [long](($nodes | ForEach-Object { $_.Node.Bytes } | Measure-Object -Sum).Sum)
+        $files = [int](($nodes | ForEach-Object { $_.Node.Files } | Measure-Object -Sum).Sum)
+        $level = if (@($nodes | Where-Object { $_.Safety -eq 'Optional' }).Count -gt 0) { 'Optional' } else { 'Safe' }
+        $name = (Get-Culture).TextInfo.ToTitleCase((Split-Path -Path $group.Name -Leaf))
+        $paths = @($nodes | ForEach-Object { $_.Node.Path })
+        $kinds = (($nodes | ForEach-Object { $_.Kind } | Sort-Object -Unique) -join ', ')
+        $isSelected = ($level -eq 'Safe' -and $bytes -gt 0)
+        $items.Add([PSCustomObject]@{
+            Id = "App:$($group.Name.ToLowerInvariant())"; Group = 'Browser & App Caches'; CategoryName = "$name caches (detected)"
+            Icon = '[APP]'; DisplayName = "$name caches (detected)"; Target = $paths[0]; Targets = $paths; Type = 'DirectoryContents'
+            SafetyLevel = $level; SafetyBadge = $level.ToUpper()
+            WhatGetsDeleted = "Cache folders detected inside the $name app data ($kinds): " + (($paths | ForEach-Object { "$(Split-Path -Path (Split-Path -Path $_ -Parent) -Leaf)\$(Split-Path -Path $_ -Leaf)" }) -join '; ')
+            SafetyExplanation = "$level`: Folders recognised by their contents as caches the app rebuilds itself. Logins, bookmarks, history, settings and documents are not in these folders. Close the app first; files in use are skipped."
+            Consequences = $(if ($level -eq 'Optional') { 'The app may start a little slower once while it rebuilds. Offline data held by web apps (service worker caches) or downloaded extension packages is fetched again when needed.' } else { 'The app may start a little slower once while caches are rebuilt.' })
+            RawBytes = $bytes; DisplaySize = (Format-Bytes -Bytes $bytes); FileCount = "$files items"; RawCount = $files
+            Description = "Detected cache folders of $name ($kinds)"
+            Recommended = ($level -eq 'Safe'); RequiresAdmin = $false; IsSelected = [bool]$isSelected; PathExists = $true
+            CanSelect = $true; SelectTip = 'Include in Clean Selected'; Dynamic = $true
+        })
+    }
+    return @($items | Sort-Object -Property @{ Expression = { $_.RawBytes }; Descending = $true })
+}
+
+# Re-measure detected items after a clean (they are not in the fixed target list, so a normal rescan cannot do it)
+function Update-DetectedItemSize {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] $Item)
+
+    $bytes = [long]0; $files = 0
+    foreach ($t in @($Item.Targets)) {
+        $m = Get-FolderSizeFast -Path $t
+        $bytes += [long]$m.RawBytes; $files += [int]$m.FileCount
+    }
+    $Item.RawBytes = $bytes; $Item.RawCount = $files; $Item.DisplaySize = Format-Bytes -Bytes $bytes; $Item.FileCount = "$files items"
+    $Item.IsSelected = $false
+    return $Item
+}
+
+
 # --- Module: Find-LargeFiles.ps1 ---
 function Find-LargeFiles {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
-        [string]$TargetPath = "C:\",
+        [string]$TargetPath = $(if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') + '\' } else { 'C:\' }),
 
         [Parameter(Mandatory = $false)]
         [long]$MinSizeBytes = 100MB,
@@ -702,7 +861,8 @@ function Get-CDriveMetrics {
     param()
 
     try {
-        $cDrive = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.Name -like "C:*" -and $_.IsReady } | Select-Object -First 1
+        $sysDriveRoot = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') + '\' } else { 'C:\' }
+        $cDrive = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.Name -ieq $sysDriveRoot -and $_.IsReady } | Select-Object -First 1
         if ($cDrive) {
             $totalGB = [math]::Round($cDrive.TotalSize / 1GB, 2)
             $freeGB = [math]::Round($cDrive.AvailableFreeSpace / 1GB, 2)
@@ -724,6 +884,484 @@ function Get-CDriveMetrics {
     } catch {}
 
     return $null
+}
+
+
+# --- Module: Get-SpaceRules.ps1 ---
+# What each big folder is and what to do about it. Rules match scanned folders by exact path only.
+# Evidence rule: only paths verified on a real machine may be 'Clean'; everything else is Review/Uninstall/Command/System.
+
+function Get-AllowedCommands {
+    [CmdletBinding()]
+    param()
+    $sysDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') } else { 'C:' }
+    # The UI never builds a command from scanned data: only these exact commands can run.
+    return @{
+        DockerPrune = @{
+            Short = 'Prune Docker data'
+            Exe = 'docker.exe'; Args = @('system', 'prune', '-f'); RequiresAdmin = $false
+            Title = 'Prune unused Docker data'
+            Consent = "This runs 'docker system prune -f'. Docker Desktop must be running. It removes stopped containers, unused networks and dangling images. Volumes are kept.`n`nIt frees space INSIDE Docker's virtual disk. The disk file on C: only shrinks after it is compacted (stop Docker Desktop, then use Compact). This cannot be undone."
+        }
+        CompactDisk = @{
+            Short = 'Compact virtual disk'
+            Exe = 'diskpart.exe'; Args = @('/s', '<generated script file>'); RequiresAdmin = $true
+            Title = 'Compact a Docker or WSL virtual disk'
+            Consent = "This shuts WSL down and runs diskpart to compact the virtual disk: select vdisk, attach it read-only, compact vdisk, detach.`n`nDocker Desktop must be quit first (Diskman refuses while it is running). Containers and images are not deleted; the disk file only gives back space that was already freed inside it, so run 'docker system prune' first to free more. It can take several minutes."
+        }
+        ComponentCleanup = @{
+            Short = 'Component cleanup'
+            Exe = 'Dism.exe'; Args = @('/Online', '/Cleanup-Image', '/StartComponentCleanup'); RequiresAdmin = $true
+            Title = 'Clean up the Windows component store'
+            Consent = "This runs 'Dism /Online /Cleanup-Image /StartComponentCleanup'. It removes superseded versions of Windows components from WinSxS.`n`nIt can take several minutes. Afterwards, already installed updates can no longer be uninstalled."
+        }
+        HibernateOff = @{
+            Short = 'Turn hibernation off'
+            Exe = 'powercfg.exe'; Args = @('/h', 'off'); RequiresAdmin = $true
+            Title = 'Turn hibernation off'
+            Consent = "This runs 'powercfg /h off'. It deletes hiberfil.sys and turns Hibernate OFF.`n`nIt also disables Fast Startup. You can turn it back on with 'powercfg /h on'."
+        }
+        ShadowDelete = @{
+            Short = 'Delete oldest restore point'
+            Exe = 'vssadmin.exe'; Args = @('delete', 'shadows', "/for=$sysDrive", '/oldest', '/quiet'); RequiresAdmin = $true
+            Title = 'Delete the oldest shadow copy'
+            Consent = "This runs 'vssadmin delete shadows /for=$sysDrive /oldest'. It deletes the OLDEST shadow copy, which removes a System Restore point and the file history stored in it.`n`nThis cannot be undone."
+        }
+    }
+}
+
+function Invoke-AllowedCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('DockerPrune', 'ComponentCleanup', 'HibernateOff', 'ShadowDelete', 'CompactDisk')]
+        [string]$Id,
+
+        [scriptblock]$OnLine = $null,
+
+        # Only used by CompactDisk, and only accepted when it matches a registered Docker/WSL disk exactly
+        [string]$Path = $null
+    )
+
+    if ($Id -eq 'CompactDisk') { return Invoke-VhdCompact -Path $Path -OnLine $OnLine }
+    $cmd = (Get-AllowedCommands)[$Id]
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $say = { param($t) if ($null -ne $OnLine) { & $OnLine $t } }
+
+    if ($cmd.RequiresAdmin -and -not $isAdmin) {
+        & $say "Skipped: '$($cmd.Title)' needs Administrator rights. Use Restart as Administrator."
+        return -1
+    }
+    if ($env:DISKMAN_DRY_RUN -eq '1') {
+        # Test and demo switch: validation above still ran, but nothing is executed
+        & $say "Dry run: would run $($cmd.Exe) $($cmd.Args -join ' ')"
+        return 0
+    }
+    try {
+        & $say "Running: $($cmd.Exe) $($cmd.Args -join ' ')"
+        & $cmd.Exe @($cmd.Args) 2>&1 | ForEach-Object { & $say "$_" }
+        return $LASTEXITCODE
+    } catch {
+        & $say "Could not run $($cmd.Exe): $($_.Exception.Message)"
+        return -1
+    }
+}
+
+function Get-SpaceRules {
+    [CmdletBinding()]
+    param()
+
+    $local   = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData).TrimEnd('\')
+    $roaming = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ApplicationData).TrimEnd('\')
+    $drive   = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') } else { 'C:' }
+    $windows = if ($env:SystemRoot) { $env:SystemRoot.TrimEnd('\') } else { "$drive\Windows" }
+    $pf      = if ($env:ProgramFiles) { $env:ProgramFiles.TrimEnd('\') } else { "$drive\Program Files" }
+    $pd      = if ($env:ProgramData) { $env:ProgramData.TrimEnd('\') } else { "$drive\ProgramData" }
+
+    $rules = New-Object System.Collections.Generic.List[hashtable]
+    $add = {
+        param($path, $title, $what, $verdict, $safety, $extra)
+        $r = @{ Path = $path; Title = $title; What = $what; Verdict = $verdict; Safety = $safety; TargetId = $null; CommandId = $null; Param = $null; Effect = $null; Uri = $null; RequiresAdmin = $false }
+        if ($extra) { foreach ($k in $extra.Keys) { $r[$k] = $extra[$k] } }
+        $rules.Add($r)
+    }
+
+    # Every cleanup target is also a rule, so the Cleaner tab and the explorer never disagree
+    foreach ($t in (Get-CleanableTargets)) {
+        & $add $t.Path $t.Category $t.Description 'Clean' $t.SafetyLevel @{ TargetId = $t.Id; RequiresAdmin = [bool]$t.RequiresAdmin }
+    }
+
+    # Cache folders detected by structure (Find-AppCaches): each folder gets its own row of advice, cleaning is per app group
+    foreach ($item in @($script:DetectedCacheItems)) {
+        foreach ($t in @($item.Targets)) {
+            & $add $t $item.CategoryName $item.Description 'Clean' $item.SafetyLevel @{ TargetId = $item.Id }
+        }
+    }
+
+    # Virtual disks of Docker and WSL that can be compacted (found by registration, never by searching for *.vhdx)
+    foreach ($disk in (Get-CompactableDisks)) {
+        & $add (Split-Path -Path $disk.Path -Parent) "$($disk.Name) virtual disk" "A virtual disk file ($(Format-Bytes -Bytes $disk.Bytes)) that grows but never shrinks by itself. Compacting returns what was deleted inside it to C:." 'Command' 'Advanced' @{ CommandId = 'CompactDisk'; Param = $disk.Path; RequiresAdmin = $true; Effect = 'gives back only what Docker/WSL already freed inside the disk. Stop Docker Desktop first.' }
+    }
+
+    & $add "$local\Docker" 'Docker Desktop data' "Docker images, containers and volumes live in one virtual disk (docker_data.vhdx). Pruning frees space inside it; the file on C: only shrinks after compaction." 'Command' 'Advanced' @{ CommandId = 'DockerPrune'; Effect = 'frees space inside Docker, not on C:. C: only shrinks after the disk file is compacted.' }
+    & $add "$local\Programs\DockerDesktop" 'Docker Desktop application' 'The Docker Desktop program files. Uninstall it from Settings if you no longer use Docker.' 'Uninstall' 'Review' @{ Effect = 'frees roughly the folder size once uninstalled.' }
+    & $add "$pf\NVIDIA Corporation\RTX Remix" 'NVIDIA RTX Remix' 'An installed NVIDIA modding application. Uninstall it from Settings if you do not use it.' 'Uninstall' 'Review' $null
+    & $add "$pd\NVIDIA Corporation\NVIDIA App\UpdateFramework" 'NVIDIA App update staging' 'Downloaded NVIDIA App update files. Not verified as safe to delete, so review it first.' 'Review' 'Review' $null
+    & $add "$pd\NVIDIA\NGX\models" 'NVIDIA NGX models (DLSS)' 'AI models used by DLSS. The NVIDIA driver fetches them as needed, but this is not verified, so review it first.' 'Review' 'Review' $null
+    & $add "$pd\NVIDIA\Streamline" 'NVIDIA Streamline' 'Shared NVIDIA graphics runtime files used by games.' 'Review' 'Review' $null
+    & $add "$local\Claude-Data" 'Claude app data' 'Data of the Claude desktop app. Diskman never offers this for deletion.' 'Review' 'Review' $null
+    & $add "$local\Arduino15\packages\esp32" 'Arduino ESP32 board package' 'ESP32 toolchains installed by the Arduino IDE. Remove them in Boards Manager if you no longer build for ESP32.' 'Review' 'Review' $null
+    # Python installs from python.org / the Python install manager (any version)
+    foreach ($d in (Get-ChildItem -Path "$local\Python" -Directory -Filter 'pythoncore-*' -ErrorAction SilentlyContinue)) {
+        & $add $d.FullName "Python installation ($($d.Name))" 'A Python install. Most of its size is usually installed packages (for example torch). Remove packages you no longer need with pip uninstall.' 'Review' 'Review' $null
+    }
+    & $add "$roaming\Apple Computer\MobileSync\Backup" 'iPhone / iPad backups (iTunes)' 'Full device backups made by iTunes. Often 10-100 GB. Delete old ones from iTunes (Edit > Preferences > Devices), not by hand, and only if you no longer need to restore from them.' 'Review' 'Review' $null
+    foreach ($od in @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial | Where-Object { $_ } | Select-Object -Unique)) {
+        & $add $od 'OneDrive folder' 'Files synced from OneDrive. To free space without losing them, right-click the folder in Explorer and choose Free up space (files stay online). Do not delete them: that deletes them from the cloud too.' 'Review' 'Review' $null
+    }
+    & $add "$pf\Microsoft Office" 'Microsoft Office' 'The installed Office applications. Uninstall from Settings only if you no longer use them.' 'Uninstall' 'Review' $null
+    & $add "$local\hermes" 'hermes application data' 'Application data and runtimes of the hermes app. Review before removing.' 'Review' 'Review' $null
+    & $add "$roaming\npm\node_modules" 'Global npm packages' 'Globally installed npm tools. They can be reinstalled with npm, but you may rely on them.' 'Review' 'Review' $null
+    & $add "$windows\WinSxS" 'Windows component store (WinSxS)' 'Windows keeps component versions here, shared with System32 by hard links, so its real size is smaller than the number shown. Never delete it by hand; component cleanup is the safe way.' 'Command' 'Advanced' @{ CommandId = 'ComponentCleanup'; RequiresAdmin = $true; Effect = 'usually frees much less than the folder size shown, because most of it is shared with System32.' }
+    & $add "$windows\System32" 'Windows system files' 'Core Windows files. Not reclaimable.' 'System' 'Review' $null
+    & $add "$windows\Installer" 'Windows Installer cache' 'Needed to repair or uninstall programs. Deleting files here breaks them.' 'System' 'Review' $null
+    & $add "$drive\hiberfil.sys" 'Hibernation file' 'Holds memory for hibernation and Fast Startup. Turning hibernation off deletes it.' 'Command' 'Advanced' @{ CommandId = 'HibernateOff'; RequiresAdmin = $true }
+    & $add "$drive\Windows.old" 'Previous Windows installation' 'Left behind by a Windows upgrade. Remove it from Settings > Storage > Temporary files.' 'Uninstall' 'Review' @{ Uri = 'ms-settings:storagesense' }
+
+    # Store Python keeps pip packages inside a package folder whose name carries a publisher suffix
+    foreach ($d in (Get-ChildItem -Path "$local\Packages" -Directory -Filter 'PythonSoftwareFoundation.Python.*' -ErrorAction SilentlyContinue)) {
+        & $add "$($d.FullName)\LocalCache\local-packages" 'Python packages (Microsoft Store Python)' 'Packages installed with pip for the Store version of Python. Review which projects need them.' 'Review' 'Review' $null
+    }
+
+    return $rules
+}
+
+$script:SpaceRuleIndex = $null
+$script:DetectedCacheItems = @()
+
+# Detected cache items become rules too; rebuilding the index makes the Overview and Explorer show advice for them
+function Set-DetectedCacheItems {
+    [CmdletBinding()]
+    param($Items)
+    $script:DetectedCacheItems = @($Items)
+    $script:SpaceRuleIndex = $null
+}
+
+function Find-SpaceRule {
+    [CmdletBinding()]
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if ($null -eq $script:SpaceRuleIndex) {
+        $script:SpaceRuleIndex = @{}
+        foreach ($r in (Get-SpaceRules)) {
+            try { $script:SpaceRuleIndex[[System.IO.Path]::GetFullPath($r.Path).TrimEnd('\').ToLowerInvariant()] = $r } catch {}
+        }
+    }
+    $key = $Path.TrimEnd('\').ToLowerInvariant()
+    return $script:SpaceRuleIndex[$key]
+}
+
+# Advice for folders no exact rule knows, from where the folder sits. Deliberately limited to Uninstall / Review / System:
+# it can explain and point to Settings, but it can never offer Clean or Command, so a wrong guess cannot delete anything.
+$script:AdviceContext = $null
+function Get-GenericAdvice {
+    [CmdletBinding()]
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    $p = $Path.TrimEnd('\')
+    if ($p -match '^[A-Za-z]:?$') { return $null }   # a drive root has no leaf or parent to reason about
+    $leaf = Split-Path -Path $p -Leaf
+    $parent = (Split-Path -Path $p -Parent)
+    if (-not $parent) { return $null }
+    $parent = $parent.TrimEnd('\')
+
+    # Known-folder lookups are slow and identical for every call, so they are read once per process
+    if (-not $script:AdviceContext) {
+        $profileDir = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile).TrimEnd('\')
+        $driveName = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') } else { 'C:' }
+        $ownFolders = @()
+        foreach ($f in 'Desktop', 'MyDocuments', 'MyPictures', 'MyVideos', 'MyMusic') {
+            $kf = [System.Environment]::GetFolderPath($f); if ($kf) { $ownFolders += $kf.TrimEnd('\') }
+        }
+        $ownFolders += "$profileDir\Downloads"
+        $script:AdviceContext = @{
+            Profile = $profileDir
+            Local   = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData).TrimEnd('\')
+            Roaming = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ApplicationData).TrimEnd('\')
+            Windows = $(if ($env:SystemRoot) { $env:SystemRoot.TrimEnd('\') } else { "$driveName\Windows" })
+            Pf      = $(if ($env:ProgramFiles) { $env:ProgramFiles.TrimEnd('\') } else { "$driveName\Program Files" })
+            Pf86    = $(if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)}.TrimEnd('\') } else { "$driveName\Program Files (x86)" })
+            Pd      = $(if ($env:ProgramData) { $env:ProgramData.TrimEnd('\') } else { "$driveName\ProgramData" })
+            Own     = $ownFolders
+        }
+    }
+    $ctx = $script:AdviceContext
+    $profilePath = $ctx.Profile; $local = $ctx.Local; $roaming = $ctx.Roaming; $windows = $ctx.Windows
+    $pf = $ctx.Pf; $pf86 = $ctx.Pf86; $pd = $ctx.Pd
+
+    $make = {
+        param($verdict, $title, $what, $uri)
+        @{ Path = $Path; Title = $title; What = $what; Verdict = $verdict; Safety = 'Review'; TargetId = $null; CommandId = $null; Param = $null; Effect = $null; Uri = $uri; RequiresAdmin = $false; Generic = $true }
+    }
+    $same = { param($a, $b) $a -ieq $b }
+
+    # Installed programs. Windows components and hardware drivers are on a keep-list: never suggest uninstalling those.
+    if ((& $same $parent $pf) -or (& $same $parent $pf86) -or (& $same $parent "$local\Programs")) {
+        if ($leaf -match '^(Windows|Microsoft|Common Files|WindowsApps|ModifiableWindowsApps|Internet Explorer|Reference Assemblies|MSBuild|dotnet|WindowsPowerShell|PowerShell|Uninstall Information|NVIDIA|Intel|AMD|Advanced Micro Devices|Realtek|Qualcomm|Synaptics|Dolby|Waves|MediaTek)') {
+            return & $make 'System' "$leaf (Windows or driver software)" 'Part of Windows or software that runs your hardware (drivers, graphics, audio). Keep it.' $null
+        }
+        return & $make 'Uninstall' "Installed program: $leaf" "A program installed on this PC. If you no longer use it, uninstall it from Settings > Apps. Do not delete the folder by hand: that leaves a broken entry behind." 'ms-settings:appsfeatures'
+    }
+
+    # Game libraries
+    if ($p -match '\\steamapps\\common\\[^\\]+$') {
+        return & $make 'Review' "Steam game: $leaf" 'A Steam game. Uninstall it from Steam (Library, right-click the game, Manage, Uninstall) so Steam stays consistent. Games are often the biggest items on a drive.' $null
+    }
+    if ($p -match '\\Epic Games\\[^\\]+$' -and $parent -match 'Epic Games$') {
+        return & $make 'Review' "Epic Games game: $leaf" 'An Epic Games Store game. Uninstall it from the Epic Games Launcher library.' $null
+    }
+    if ($p -match '\\XboxGames\\[^\\]+$') {
+        return & $make 'Uninstall' "Xbox / Store game: $leaf" 'A game installed through the Xbox app or Microsoft Store. Uninstall it from Settings > Apps.' 'ms-settings:appsfeatures'
+    }
+
+    # The user's own files (known folder locations, which can be renamed or redirected)
+    foreach ($o in $ctx.Own) {
+        if ((& $same $p $o) -or $p.StartsWith($o + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return & $make 'Review' "Your files: $leaf" 'Your own files. Diskman never deletes these in bulk. Use the Large Files tab to find the biggest ones, or move what you rarely open to another drive or cloud storage.' $null
+        }
+    }
+
+    # Microsoft Store app data
+    if ((& $same $parent "$local\Packages")) {
+        return & $make 'Review' "Store app data: $leaf" 'Data of a Microsoft Store app. If you do not use the app, uninstall it from Settings > Apps; you can also reset it there (Advanced options) to clear its data.' 'ms-settings:appsfeatures'
+    }
+
+    # Tool folders in the user profile (.cargo, .gradle, .docker ...)
+    if ((& $same $parent $profilePath) -and $leaf.StartsWith('.')) {
+        return & $make 'Review' "Tool data: $leaf" 'Settings, caches and downloads of a developer or command-line tool. Some of it can be rebuilt, but it can also hold logins and project data, so check before removing anything.' $null
+    }
+
+    # Per-app data under AppData and ProgramData
+    if ((& $same $parent $local) -or (& $same $parent $roaming)) {
+        return & $make 'Review' "App data: $leaf" "Data of the app '$leaf'. It may hold caches, but also your settings and local files. Diskman only offers to clean folders it recognises; open this one to decide." $null
+    }
+    if ((& $same $parent $pd)) {
+        return & $make 'Review' "Shared app data: $leaf" "Data shared by '$leaf' for all users on this PC (updates, caches, licences). Review before removing; uninstalling the program is usually the safe way to remove it." $null
+    }
+
+    if ($p.StartsWith($windows + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return & $make 'System' "Windows: $leaf" 'Part of Windows. Not reclaimable by hand.' $null
+    }
+    return $null
+}
+
+
+# --- Module: Get-SystemSpace.ps1 ---
+# Space Windows manages itself, shown with plain-English notes so the numbers are not a mystery.
+
+# Finds a folder in a scanned tree by walking path components (folders under 1 MB are not in the tree).
+function Find-TreeNode {
+    [CmdletBinding()]
+    param($Root, [string]$Path)
+
+    if ($null -eq $Root -or [string]::IsNullOrWhiteSpace($Path)) { return $null }
+    $node = $Root
+    $rest = $Path.Substring([math]::Min($Path.Length, $Root.Path.TrimEnd('\').Length)).Trim('\')
+    if ($rest -eq '') { return $node }
+    foreach ($part in $rest.Split('\')) {
+        $node = $node.Children | Where-Object { $_.Name -ieq $part } | Select-Object -First 1
+        if ($null -eq $node) { return $null }
+    }
+    return $node
+}
+
+function Get-SystemSpace {
+    [CmdletBinding()]
+    param($Root = $null, [bool]$Elevated = $false)
+
+    $drive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') } else { 'C:' }
+    $rows = New-Object System.Collections.Generic.List[object]
+    $row = { param($n, $b, $note, $admin, $cmd, $uri = $null) $rows.Add([PSCustomObject]@{ Name = $n; Bytes = $b; Note = $note; NeedsAdmin = $admin; CommandId = $cmd; Uri = $uri }) }
+
+    # Locked system files are visible to DirectoryInfo even without administrator rights
+    $rootDir = New-Object System.IO.DirectoryInfo "$drive\"
+    $fileSize = { param($name) $f = $rootDir.EnumerateFiles($name) | Select-Object -First 1; if ($f) { [long]$f.Length } else { $null } }
+
+    $swap = & $fileSize 'swapfile.sys'
+    & $row 'swapfile.sys' $swap 'Used by Windows for modern apps. Windows manages it; small.' $false $null
+
+    $pageNote = 'No paging file found.'
+    try {
+        $pf = @(Get-CimInstance Win32_PageFileUsage -ErrorAction Stop)
+        if ($pf.Count -gt 0) {
+            $where = ($pf | ForEach-Object { "$($_.Name) ($([math]::Round($_.AllocatedBaseSize / 1024, 1)) GB)" }) -join ', '
+            $onC = @($pf | Where-Object { $_.Name -like "$drive*" }).Count -gt 0
+            $pageNote = if ($onC) { "Paging file on $drive`: $where. Windows manages it." } else { "Paging file is not on $drive`: $where. It does not use space on $drive." }
+        }
+    } catch {}
+    $page = & $fileSize 'pagefile.sys'
+    & $row 'Paging file' $page $pageNote $false $null
+
+    $hiber = & $fileSize 'hiberfil.sys'
+    if ($null -ne $hiber) {
+        & $row 'Hibernation file (hiberfil.sys)' $hiber 'Used by Hibernate and Fast Startup. Turning hibernation off frees it.' $true 'HibernateOff'
+    } else {
+        & $row 'Hibernation file (hiberfil.sys)' 0 'Hibernation is off. Nothing to free here.' $false $null
+    }
+
+    if ($Elevated) {
+        # Win32_ShadowStorage is language-independent (vssadmin text is not). It needs an elevated session; if it fails the size stays "not measured".
+        $shadow = $null
+        try {
+            $vol = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter='$drive'" -ErrorAction Stop
+            $used = @(Get-CimInstance -ClassName Win32_ShadowStorage -ErrorAction Stop | Where-Object { $_.Volume.DeviceID -eq $vol.DeviceID } | ForEach-Object { [long]$_.UsedSpace })
+            if ($used.Count -gt 0) { $shadow = [long]($used | Measure-Object -Sum).Sum }
+        } catch {}
+        & $row 'Shadow copies (restore points)' $shadow 'Restore points and file history snapshots. Deleting the oldest frees space but removes a restore point.' $false $(if ($shadow) { 'ShadowDelete' } else { $null })
+    } else {
+        & $row 'Shadow copies (restore points)' $null 'Needs administrator to measure. Often the biggest hidden item.' $true $null
+    }
+
+    $winsxs = Find-TreeNode -Root $Root -Path "$($env:SystemRoot)\WinSxS"
+    & $row 'Windows component store (WinSxS)' $(if ($winsxs) { [long]$winsxs.Bytes } else { $null }) 'Shared with System32 by hard links, so the real size is smaller. Use component cleanup, never delete by hand.' $true 'ComponentCleanup'
+
+    # A crash dump left by a Windows blue screen: very common, often several GB. Settings removes it safely.
+    try {
+        $dump = (New-Object System.IO.DirectoryInfo $env:SystemRoot).EnumerateFiles('MEMORY.DMP') | Select-Object -First 1
+        if ($dump) { & $row 'System crash dump (MEMORY.DMP)' ([long]$dump.Length) "Left by a Windows crash; only useful for debugging it. Remove it in Settings > Storage > Temporary files (System error memory dump files)." $false $null 'ms-settings:storagesense' }
+    } catch {}
+
+    foreach ($name in 'Windows.old', '$Windows.~BT', '$WinREAgent') {
+        $n = Find-TreeNode -Root $Root -Path "$drive\$name"
+        if ($n) { & $row $name ([long]$n.Bytes) 'Left behind by a Windows upgrade or update. Remove it from Settings > Storage > Temporary files.' $false $null 'ms-settings:storagesense' }
+    }
+    return $rows.ToArray()
+}
+
+
+# --- Module: Invoke-DiskCompact.ps1 ---
+# Docker Desktop and WSL keep their data in virtual disks (.vhdx) that grow but never shrink on their own.
+# Compacting returns what was deleted INSIDE the disk to C:. Disks are found only through how they are registered
+# (Docker's fixed paths and each WSL distro's BasePath), never by searching for *.vhdx: other apps keep VM disks too.
+
+function Get-CompactableDisks {
+    [CmdletBinding()]
+    param()
+
+    $local = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData).TrimEnd('\')
+    $found = New-Object System.Collections.Generic.List[object]
+    $add = {
+        param($name, $path, $kind)
+        if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
+            $found.Add([PSCustomObject]@{ Name = $name; Path = [System.IO.Path]::GetFullPath($path); Bytes = [long](Get-Item -LiteralPath $path -Force).Length; Kind = $kind })
+        }
+    }
+
+    & $add 'Docker Desktop data' "$local\Docker\wsl\disk\docker_data.vhdx" 'Docker'
+    & $add 'Docker Desktop (main)' "$local\Docker\wsl\main\ext4.vhdx" 'Docker'
+    & $add 'Docker Desktop (data)' "$local\Docker\wsl\data\ext4.vhdx" 'Docker'
+
+    try {
+        foreach ($key in (Get-ChildItem -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction Stop)) {
+            $p = Get-ItemProperty -Path $key.PSPath -ErrorAction SilentlyContinue
+            if ($p.BasePath -and $p.DistributionName -and $p.DistributionName -notlike 'docker-desktop*') {
+                $base = ([string]$p.BasePath) -replace '^\\\\\?\\', ''
+                & $add "WSL: $($p.DistributionName)" (Join-Path $base 'ext4.vhdx') 'WSL'
+            }
+        }
+    } catch {}
+
+    # The same file can be reached twice (Docker's own distro is also registered): keep one entry per path
+    return @($found | Group-Object -Property { $_.Path.ToLowerInvariant() } | ForEach-Object { $_.Group[0] })
+}
+
+# Docker Desktop's engine pipe exists only while the engine runs (instant check, no process start)
+function Test-DockerEngineRunning {
+    [CmdletBinding()]
+    param()
+    return ((Test-Path -LiteralPath '\\.\pipe\dockerDesktopLinuxEngine') -or (Test-Path -LiteralPath '\\.\pipe\docker_engine'))
+}
+
+# The exact text handed to diskpart: nothing but the validated path is variable
+function New-DiskpartCompactScript {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return "select vdisk file=`"$Path`"`r`nattach vdisk readonly`r`ncompact vdisk`r`ndetach vdisk`r`nexit`r`n"
+}
+
+# Best effort after every attempt: a failed compact must not leave the disk attached (Docker and WSL could not start)
+function New-DiskpartDetachScript {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return "select vdisk file=`"$Path`"`r`ndetach vdisk noerr`r`nexit`r`n"
+}
+
+function Invoke-VhdCompact {
+    [CmdletBinding()]
+    param([string]$Path, [scriptblock]$OnLine = $null)
+
+    $say = { param($t) if ($null -ne $OnLine) { & $OnLine $t } }
+
+    $disk = @(Get-CompactableDisks | Where-Object { $_.Path -ieq $Path }) | Select-Object -First 1
+    if (-not $disk) {
+        & $say "Refused: '$Path' is not a registered Docker or WSL disk, so Diskman will not compact it."
+        return -1
+    }
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        & $say "Skipped: compacting a virtual disk needs Administrator rights. Use Restart as Administrator."
+        return -1
+    }
+    if ($env:DISKMAN_DRY_RUN -eq '1') {
+        & $say "Dry run: would shut WSL down and compact '$($disk.Path)' with diskpart."
+        return 0
+    }
+    if (Get-Process -Name 'Docker Desktop', 'com.docker.backend' -ErrorAction SilentlyContinue) {
+        & $say "Skipped: Docker Desktop is still running. Quit Docker Desktop from its tray icon first, then try again."
+        return -1
+    }
+
+    & $say "Shutting down WSL so the disk is not in use..."
+    & wsl.exe --shutdown 2>&1 | ForEach-Object { & $say "$_" }
+    Start-Sleep -Seconds 3
+
+    try {
+        $probe = [System.IO.File]::Open($disk.Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        $probe.Dispose()
+    } catch {
+        & $say "Skipped: the disk is still in use by another program ($($_.Exception.Message)). Close anything using WSL or Docker and try again."
+        return -1
+    }
+
+    $before = [long](Get-Item -LiteralPath $disk.Path -Force).Length
+    $tmpDir = [System.IO.Path]::GetTempPath()
+    $scriptFile = Join-Path $tmpDir ("diskman_compact_" + [guid]::NewGuid().ToString('N') + ".txt")
+    $detachFile = Join-Path $tmpDir ("diskman_detach_" + [guid]::NewGuid().ToString('N') + ".txt")
+    $failed = $false
+    try {
+        [System.IO.File]::WriteAllText($scriptFile, (New-DiskpartCompactScript -Path $disk.Path), [System.Text.Encoding]::ASCII)
+        & $say "Compacting $($disk.Name) ($(Format-Bytes -Bytes $before)). This can take several minutes..."
+        $output = @(& diskpart.exe /s $scriptFile 2>&1 | ForEach-Object { "$_" })
+        $exit = $LASTEXITCODE
+        foreach ($line in $output) { if ($line.Trim()) { & $say $line } }
+        # The exit code decides (diskpart's messages are translated, so their text cannot be relied on)
+        $failed = ($exit -ne 0)
+    } finally {
+        try {
+            [System.IO.File]::WriteAllText($detachFile, (New-DiskpartDetachScript -Path $disk.Path), [System.Text.Encoding]::ASCII)
+            & diskpart.exe /s $detachFile 2>&1 | Out-Null
+        } catch {}
+        Remove-Item -LiteralPath $scriptFile, $detachFile -Force -ErrorAction SilentlyContinue
+    }
+    if ($failed) {
+        & $say "Compaction failed. The disk was detached again, so Docker and WSL can start normally. Details are in the lines above."
+        return -1
+    }
+    $after = [long](Get-Item -LiteralPath $disk.Path -Force).Length
+    & $say "Disk file went from $(Format-Bytes -Bytes $before) to $(Format-Bytes -Bytes $after) (freed $(Format-Bytes -Bytes ([math]::Max([long]0, $before - $after))))."
+    return 0
 }
 
 
@@ -934,12 +1572,13 @@ function Get-CleanableTargets {
             Path              = $userTempPath
             Description       = 'Temporary application and cache files created by running user programs'
             WhatGetsDeleted   = 'Temporary session files, scratch buffers, installer extractors, and ephemeral .tmp files in %LOCALAPPDATA%\Temp.'
-            SafetyExplanation = 'Safe: Temporary scratch space used by running programs. Files actively locked by open processes are automatically skipped. User documents, personal files, and program installations are never stored here.'
+            SafetyExplanation = 'Safe: Temporary scratch space used by running programs. Files actively locked by open processes are automatically skipped, and anything changed in the last 24 hours is kept (an installer or app may still be using it). User documents, personal files, and program installations are never stored here.'
             Consequences      = 'None. Running applications will automatically create fresh temporary files during future sessions as needed.'
             SafetyBadge       = 'SAFE'
             Type              = 'DirectoryContents'
             SafetyLevel       = 'Safe'
             Recommended       = $true
+            MinAgeHours       = 24
             RequiresAdmin     = $false
         },
         @{
@@ -950,12 +1589,13 @@ function Get-CleanableTargets {
             Path              = (Join-Path $sysRoot 'Temp')
             Description       = 'Operating system temporary cache files and service leftovers'
             WhatGetsDeleted   = 'Operating system service scratch files, driver extraction folders, and background installer leftovers in C:\Windows\Temp.'
-            SafetyExplanation = 'Safe (Admin): Temporary files discarded by completed Windows updates and service installations. Active Windows kernel/service files are locked and skipped.'
+            SafetyExplanation = 'Safe (Admin): Temporary files discarded by completed Windows updates and service installations. Active Windows kernel/service files are locked and skipped, and anything changed in the last 24 hours is kept.'
             Consequences      = 'None. System services and installers generate new temporary files when required.'
             SafetyBadge       = 'SAFE'
             Type              = 'DirectoryContents'
             SafetyLevel       = 'Safe'
             Recommended       = $true
+            MinAgeHours       = 24
             RequiresAdmin     = $true
         },
         @{
@@ -1283,15 +1923,47 @@ function Get-CleanableTargets {
             Group             = 'Developer Caches'
             Category          = 'Node.js NPM Cache'
             Icon              = '[NPM]'
-            Path              = (Join-Path $appData 'npm-cache')
+            Path              = (Join-Path $localAppData 'npm-cache\_cacache')
             Description       = 'Global Node Package Manager download cache'
-            WhatGetsDeleted   = 'Global tarball archives cached by npm in %APPDATA%\npm-cache.'
+            WhatGetsDeleted   = 'Global tarball archives cached by npm in %LOCALAPPDATA%\npm-cache\_cacache.'
             SafetyExplanation = 'Safe: Duplicate package download archives. Project node_modules, package.json, and global binaries are untouched.'
             Consequences      = 'Future npm install for previously cached packages will re-download tarballs from the npm registry.'
             SafetyBadge       = 'SAFE'
             Type              = 'DirectoryContents'
             SafetyLevel       = 'Safe'
             Recommended       = $true
+            RequiresAdmin     = $false
+        },
+        @{
+            Id                = 'NpmNpxCache'
+            Group             = 'Developer Caches'
+            Category          = 'npx Package Cache'
+            Icon              = '[NPX]'
+            Path              = (Join-Path $localAppData 'npm-cache\_npx')
+            Description       = 'Packages that npx downloaded to run (often MCP servers and CLI tools)'
+            WhatGetsDeleted   = 'Packages npx installed to run commands, in %LOCALAPPDATA%\npm-cache\_npx.'
+            SafetyExplanation = 'Optional: npx re-downloads what it needs. But tools started through npx (for example MCP servers) run their code from this folder, so close them first or they can fail until restarted.'
+            Consequences      = 'The next npx command downloads its package again. A tool that is running right now may crash if its files disappear.'
+            SafetyBadge       = 'OPTIONAL'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Optional'
+            Recommended       = $false
+            RequiresAdmin     = $false
+        },
+        @{
+            Id                = 'ElectronCache'
+            Group             = 'Developer Caches'
+            Category          = 'Electron Download Cache'
+            Icon              = '[ELECTRON]'
+            Path              = (Join-Path $localAppData 'electron\Cache')
+            Description       = 'Electron runtime downloads cached by npm tools that build desktop apps'
+            WhatGetsDeleted   = 'Cached Electron binaries and checksums in %LOCALAPPDATA%\electron\Cache.'
+            SafetyExplanation = 'Optional: Download copies. Installed apps and project files are not touched.'
+            Consequences      = 'The next build that needs Electron downloads it again (about 100-130 MB per version).'
+            SafetyBadge       = 'OPTIONAL'
+            Type              = 'DirectoryContents'
+            SafetyLevel       = 'Optional'
+            Recommended       = $false
             RequiresAdmin     = $false
         },
         @{
@@ -1550,6 +2222,9 @@ function Scan-SmartCleanupItems {
             Recommended       = [bool]$t.Recommended
             RequiresAdmin     = [bool]$t.RequiresAdmin
             IsSelected        = [bool]$isSelected
+            MinAgeHours       = [int]$t.MinAgeHours
+            CanSelect         = [bool](-not $t.RequiresAdmin -or $isAdminCurrent)
+            SelectTip         = if ($t.RequiresAdmin -and -not $isAdminCurrent) { 'Needs administrator. Use Restart as Administrator.' } else { 'Include in Clean Selected' }
             PathExists        = [bool]$pathExists
         }
     }
@@ -1717,158 +2392,169 @@ function Invoke-ExecuteCleanup {
             continue
         }
 
-        $targetPath = $item.Target
-        if (Test-Path -LiteralPath $targetPath) {
-            # Strict Safety Gate: Test-PathSafety is the final and absolute authority.
-            # No hardcoded exceptions or bypasses allowed.
-            $targetSafety = Test-PathSafety -Path $targetPath
-            if (-not $targetSafety.Safe) {
-                $msg = "BLOCKED: Target directory failed safety check: $($targetSafety.Reason)"
-                $logMessages += $msg
-                if ($null -ne $OnProgress) {
-                    & $OnProgress "  [X] $msg" "ERROR"
-                }
-                continue
-            }
-
-            # A target that is itself a junction/symlink points elsewhere (e.g. a cache moved to D:): never delete through it
-            if ((Test-ReparsePoint -Path $targetPath).IsReparsePoint) {
-                $msg = "SKIPPED $($item.CategoryName): $targetPath is a link to another location, so Diskman will not clean through it."
-                $logMessages += $msg
-                if ($null -ne $OnProgress) {
-                    & $OnProgress "  [!] $msg" "WARN"
-                }
-                continue
-            }
-
-            $initialCategoryBytes = [long]$item.RawBytes
-            $catFreedBytes = [long]0
-            $catDeletedCount = 0
-            $catSkippedCount = 0
-
-            try {
-                $itemsToClean = Get-ChildItem -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
-                $totalInCat = ($itemsToClean | Measure-Object).Count
-
-                foreach ($entry in $itemsToClean) {
-                    # Rigorous safety validation on every single child item
-                    $itemSafety = Test-PathSafety -Path $entry.FullName
-                    if (-not $itemSafety.Safe) {
-                        $catSkippedCount++
-                        if ($null -ne $OnProgress) {
-                            & $OnProgress "  [SAFETY GUARD] Skipped protected item: $($entry.Name) ($($itemSafety.Reason))" "WARN"
-                        }
-                        continue
+        $targetPaths = if ($item.Targets) { @($item.Targets) } else { @($item.Target) }
+        $multi = $targetPaths.Count -gt 1
+        foreach ($targetPath in $targetPaths) {
+            $label = if ($multi) { "$($item.CategoryName) ($(Split-Path -Path $targetPath -Leaf))" } else { $item.CategoryName }
+            if (Test-Path -LiteralPath $targetPath) {
+                # Strict Safety Gate: Test-PathSafety is the final and absolute authority.
+                # No hardcoded exceptions or bypasses allowed.
+                $targetSafety = Test-PathSafety -Path $targetPath
+                if (-not $targetSafety.Safe) {
+                    $msg = "BLOCKED: Target directory failed safety check: $($targetSafety.Reason)"
+                    $logMessages += $msg
+                    if ($null -ne $OnProgress) {
+                        & $OnProgress "  [X] $msg" "ERROR"
                     }
+                    continue
+                }
 
-                    $entryDeleted = $false
+                # A target that is itself a junction/symlink points elsewhere (e.g. a cache moved to D:): never delete through it
+                if ((Test-ReparsePoint -Path $targetPath).IsReparsePoint) {
+                    $msg = "SKIPPED ${label}: $targetPath is a link to another location, so Diskman will not clean through it."
+                    $logMessages += $msg
+                    if ($null -ne $OnProgress) {
+                        & $OnProgress "  [!] $msg" "WARN"
+                    }
+                    continue
+                }
 
-                    try {
-                        if ($entry.PSIsContainer) {
-                            # Detect Reparse Points / Junctions / Symbolic Links (Fail-Closed)
-                            $reparseCheck = Test-ReparsePoint -Path $entry.FullName
-                            if (-not $reparseCheck.Success) {
-                                # Unknown reparse state = do not delete
-                                $catSkippedCount++
-                                if ($null -ne $OnProgress) {
-                                    & $OnProgress "  [SAFETY GUARD] Skipped unverified reparse item: $($entry.Name) ($($reparseCheck.Reason))" "WARN"
-                                }
-                                continue
+                # One target keeps the scan's size; several (a detected app's cache folders) are measured per folder
+                $initialCategoryBytes = if ($multi) { [long](Get-FolderSizeFast -Path $targetPath).RawBytes } else { [long]$item.RawBytes }
+                $catFreedBytes = [long]0
+                $catDeletedCount = 0
+                $catSkippedCount = 0
+                $recentKept = 0
+                $ageFloor = if ($item.MinAgeHours) { (Get-Date).AddHours(-[int]$item.MinAgeHours) } else { $null }
+
+                try {
+                    $itemsToClean = Get-ChildItem -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
+                    $totalInCat = ($itemsToClean | Measure-Object).Count
+
+                    foreach ($entry in $itemsToClean) {
+                        # Recently changed entries may still be in use by an installer or app: keep them (Disk Cleanup does the same)
+                        if ($ageFloor -and $entry.LastWriteTime -gt $ageFloor) { $recentKept++; continue }
+
+                        # Rigorous safety validation on every single child item
+                        $itemSafety = Test-PathSafety -Path $entry.FullName
+                        if (-not $itemSafety.Safe) {
+                            $catSkippedCount++
+                            if ($null -ne $OnProgress) {
+                                & $OnProgress "  [SAFETY GUARD] Skipped protected item: $($entry.Name) ($($itemSafety.Reason))" "WARN"
                             }
+                            continue
+                        }
 
-                            if ($reparseCheck.IsReparsePoint) {
-                                # Delete only the link itself without recursive traversal
-                                try {
-                                    [System.IO.Directory]::Delete($entry.FullName, $false)
-                                    $entryDeleted = $true
-                                } catch {
-                                    $entryDeleted = $false
+                        $entryDeleted = $false
+
+                        try {
+                            if ($entry.PSIsContainer) {
+                                # Detect Reparse Points / Junctions / Symbolic Links (Fail-Closed)
+                                $reparseCheck = Test-ReparsePoint -Path $entry.FullName
+                                if (-not $reparseCheck.Success) {
+                                    # Unknown reparse state = do not delete
+                                    $catSkippedCount++
+                                    if ($null -ne $OnProgress) {
+                                        & $OnProgress "  [SAFETY GUARD] Skipped unverified reparse item: $($entry.Name) ($($reparseCheck.Reason))" "WARN"
+                                    }
+                                    continue
+                                }
+
+                                if ($reparseCheck.IsReparsePoint) {
+                                    # Delete only the link itself without recursive traversal
+                                    try {
+                                        [System.IO.Directory]::Delete($entry.FullName, $false)
+                                        $entryDeleted = $true
+                                    } catch {
+                                        $entryDeleted = $false
+                                    }
+                                } else {
+                                    try {
+                                        $attr = [System.IO.File]::GetAttributes($entry.FullName)
+                                        if ($attr -band [System.IO.FileAttributes]::ReadOnly) {
+                                            [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
+                                        }
+                                    } catch {}
+
+                                    try {
+                                        [System.IO.Directory]::Delete($entry.FullName, $true)
+                                        $entryDeleted = $true
+                                    } catch [System.UnauthorizedAccessException] {
+                                        $entryDeleted = $false
+                                    } catch {
+                                        try {
+                                            Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+                                            $entryDeleted = $true
+                                        } catch {
+                                            $entryDeleted = $false
+                                        }
+                                    }
                                 }
                             } else {
                                 try {
-                                    $attr = [System.IO.File]::GetAttributes($entry.FullName)
-                                    if ($attr -band [System.IO.FileAttributes]::ReadOnly) {
-                                        [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
-                                    }
+                                    [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
                                 } catch {}
 
                                 try {
-                                    [System.IO.Directory]::Delete($entry.FullName, $true)
+                                    [System.IO.File]::Delete($entry.FullName)
                                     $entryDeleted = $true
                                 } catch [System.UnauthorizedAccessException] {
                                     $entryDeleted = $false
                                 } catch {
                                     try {
-                                        Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+                                        Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
                                         $entryDeleted = $true
                                     } catch {
                                         $entryDeleted = $false
                                     }
                                 }
                             }
-                        } else {
-                            try {
-                                [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal)
-                            } catch {}
 
-                            try {
-                                [System.IO.File]::Delete($entry.FullName)
-                                $entryDeleted = $true
-                            } catch [System.UnauthorizedAccessException] {
-                                $entryDeleted = $false
-                            } catch {
-                                try {
-                                    Remove-Item -LiteralPath $entry.FullName -Force -ErrorAction Stop
-                                    $entryDeleted = $true
-                                } catch {
-                                    $entryDeleted = $false
+                            if ($entryDeleted) {
+                                $catDeletedCount++
+
+                                if ($catDeletedCount % 5 -eq 0 -or $catDeletedCount -le 3 -or $catDeletedCount -eq $totalInCat) {
+                                    if ($null -ne $OnProgress) {
+                                        & $OnProgress "  [$catDeletedCount / $totalInCat] Cleaned: $($entry.Name)" "INFO"
+                                    }
                                 }
+                            } else {
+                                $catSkippedCount++
                             }
-                        }
-
-                        if ($entryDeleted) {
-                            $catDeletedCount++
-
-                            if ($catDeletedCount % 5 -eq 0 -or $catDeletedCount -le 3 -or $catDeletedCount -eq $totalInCat) {
-                                if ($null -ne $OnProgress) {
-                                    & $OnProgress "  [$catDeletedCount / $totalInCat] Cleaned: $($entry.Name)" "INFO"
-                                }
-                            }
-                        } else {
+                        } catch {
                             $catSkippedCount++
                         }
-                    } catch {
-                        $catSkippedCount++
+
                     }
 
-                }
+                    # Freed = what the scan saw minus what is still there now (never an estimate)
+                    $remaining = Get-FolderSizeFast -Path $targetPath
+                    $catFreedBytes = [math]::Max([long]0, $initialCategoryBytes - [long]$remaining.RawBytes)
 
-                # Freed = what the scan saw minus what is still there now (never an estimate)
-                $remaining = Get-FolderSizeFast -Path $targetPath
-                $catFreedBytes = [math]::Max([long]0, $initialCategoryBytes - [long]$remaining.RawBytes)
+                    $totalFreedBytes += $catFreedBytes
+                    $totalDeletedCount += $catDeletedCount
 
-                $totalFreedBytes += $catFreedBytes
-                $totalDeletedCount += $catDeletedCount
-
-                $freedFormatted = Format-Bytes -Bytes $catFreedBytes
-                $msg = "Purged $($item.CategoryName): Cleaned $catDeletedCount items (Freed $freedFormatted)"
-                if ($catSkippedCount -gt 0) {
-                    if (-not $isAdmin) {
-                        $msg += " [$catSkippedCount locked/in-use items skipped (run as Administrator to clean system items)]"
-                    } else {
-                        $msg += " [$catSkippedCount locked/protected items skipped]"
+                    $freedFormatted = Format-Bytes -Bytes $catFreedBytes
+                    $msg = "Purged ${label}: Cleaned $catDeletedCount items (Freed $freedFormatted)"
+                    if ($catSkippedCount -gt 0) {
+                        if (-not $isAdmin) {
+                            $msg += " [$catSkippedCount locked/in-use items skipped (run as Administrator to clean system items)]"
+                        } else {
+                            $msg += " [$catSkippedCount locked/protected items skipped]"
+                        }
                     }
-                }
 
-                $logMessages += $msg
-                if ($null -ne $OnProgress) {
-                    & $OnProgress $msg "SUCCESS"
-                }
-            } catch {
-                $msg = "Notice on $($item.CategoryName): $_"
-                $logMessages += $msg
-                if ($null -ne $OnProgress) {
-                    & $OnProgress $msg "WARN"
+                    if ($recentKept -gt 0) { $msg += " [$recentKept items changed in the last $($item.MinAgeHours) h were kept]" }
+                    $logMessages += $msg
+                    if ($null -ne $OnProgress) {
+                        & $OnProgress $msg "SUCCESS"
+                    }
+                } catch {
+                    $msg = "Notice on $($item.CategoryName): $_"
+                    $logMessages += $msg
+                    if ($null -ne $OnProgress) {
+                        & $OnProgress $msg "WARN"
+                    }
                 }
             }
         }
@@ -1903,169 +2589,234 @@ function Invoke-ExecuteCategoryCleanup {
 }
 
 
-# --- Module: Start-FolderScan.ps1 ---
-function Start-FolderScan {
+# --- Module: Scan-DriveTree.ps1 ---
+# One-pass directory size tree for the Overview and Space Explorer, plus the accounting that makes every byte of "used" visible.
+# Compiled C# because a PowerShell loop over a million files is minutes slower. Loaded once per process.
+if (-not ('Diskman.TreeScan' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+namespace Diskman {
+    // Invariant: Bytes == OwnBytes + sum(Children.Bytes). Folders under 1 MB are folded into the parent's OwnBytes.
+    public sealed class Node {
+        public string Path, Name;
+        public long Bytes, OwnBytes, Files, ModifiedTicks;
+        public bool Shared;
+        public List<Node> Children = new List<Node>();
+    }
+    public static class TreeScan {
+        public static volatile bool Cancel;
+        public static int Parallelism = 8;   // lowered for spinning disks, where parallel seeks slow the scan down
+        public static long ScannedFiles, ScannedBytes, Errors;
+        public static volatile string Current = "";
+        public static ConcurrentDictionary<string, long> Partial = new ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        const long MinChild = 1048576;
+        const int PlaceholderAttrs = 0x1000 | 0x40000 | 0x400000; // Offline, RecallOnOpen, RecallOnDataAccess: cloud files that use no disk
+
+        public static void Reset() { Cancel = false; ScannedFiles = 0; ScannedBytes = 0; Errors = 0; Current = ""; Partial.Clear(); }
+        public static Node Scan(string root) { return Walk(new DirectoryInfo(root), 0); }
+
+        static Node Walk(DirectoryInfo dir, int depth) {
+            var node = new Node { Path = dir.FullName, Name = dir.Name };
+            var subs = new List<DirectoryInfo>();
+            try {
+                foreach (var e in dir.EnumerateFileSystemInfos()) {
+                    if (Cancel) break;
+                    var d = e as DirectoryInfo;
+                    if (d != null) {
+                        if ((d.Attributes & FileAttributes.ReparsePoint) == 0) subs.Add(d);
+                    } else {
+                        try {
+                            if (((int)e.Attributes & PlaceholderAttrs) != 0) continue;
+                            long len = ((FileInfo)e).Length;
+                            node.OwnBytes += len; node.Files++;
+                            long t = e.LastWriteTimeUtc.Ticks; if (t > node.ModifiedTicks) node.ModifiedTicks = t;
+                            Interlocked.Increment(ref ScannedFiles); Interlocked.Add(ref ScannedBytes, len);
+                        } catch { Interlocked.Increment(ref Errors); }
+                    }
+                }
+            } catch { Interlocked.Increment(ref Errors); }
+
+            if (depth == 1) Current = dir.Name;
+            var kids = new Node[subs.Count];
+            if (depth <= 2 && subs.Count > 1) {
+                Parallel.For(0, subs.Count, new ParallelOptions { MaxDegreeOfParallelism = Parallelism }, i => {
+                    kids[i] = Walk(subs[i], depth + 1);
+                    if (depth == 0) Partial[subs[i].FullName] = kids[i].Bytes;
+                });
+            } else {
+                for (int i = 0; i < subs.Count && !Cancel; i++) {
+                    kids[i] = Walk(subs[i], depth + 1);
+                    if (depth == 0) Partial[subs[i].FullName] = kids[i].Bytes;
+                }
+            }
+            foreach (var k in kids) {
+                if (k == null) continue;
+                node.Files += k.Files;
+                if (k.ModifiedTicks > node.ModifiedTicks) node.ModifiedTicks = k.ModifiedTicks;
+                if (k.Bytes >= MinChild) node.Children.Add(k); else node.OwnBytes += k.Bytes;
+            }
+            node.Children.Sort((a, b) => b.Bytes.CompareTo(a.Bytes));
+            long total = node.OwnBytes; foreach (var c in node.Children) total += c.Bytes;
+            node.Bytes = total;
+            // WinSxS is hard-linked with System32 and friends: its file-size sum overstates real use
+            node.Shared = node.Path.EndsWith("\\Windows\\WinSxS", StringComparison.OrdinalIgnoreCase);
+            return node;
+        }
+    }
+}
+'@
+}
+
+# Spinning disks lose time to parallel seeks; SSD/NVMe benefit from many threads. Unknown stays in the middle.
+function Get-ScanParallelism {
+    [CmdletBinding()]
+    param([string]$Root)
+    try {
+        $letter = ([System.IO.Path]::GetPathRoot($Root)).Substring(0, 1)
+        $disk = Get-Partition -DriveLetter $letter -ErrorAction Stop | Get-Disk -ErrorAction Stop
+        $physical = Get-PhysicalDisk -ErrorAction Stop | Where-Object { $_.DeviceId -eq [string]$disk.Number } | Select-Object -First 1
+        switch ([string]$physical.MediaType) { 'HDD' { return 2 } 'SSD' { return 8 } 'SCM' { return 8 } default { return 4 } }
+    } catch { return 4 }
+}
+
+function Scan-DriveTree {
+    [CmdletBinding()]
+    param([string]$Root = "$($env:SystemDrive)\")
+    [Diskman.TreeScan]::Reset()
+    [Diskman.TreeScan]::Parallelism = Get-ScanParallelism -Root $Root
+    return [Diskman.TreeScan]::Scan($Root)
+}
+
+# Turns a scanned tree into rows that add up to exactly $UsedBytes: measured folders plus one labelled remainder.
+function Get-SpaceAccounting {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$DirectoryPath
+        [Parameter(Mandatory = $true)] $Root,
+        [Parameter(Mandatory = $true)] [long]$UsedBytes,
+        [bool]$Elevated = $false
     )
 
-    if (-not (Test-Path -LiteralPath $DirectoryPath)) {
-        return @()
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($child in $Root.Children) {
+        $rows.Add([PSCustomObject]@{ Name = $child.Name; Path = $child.Path; Bytes = [long]$child.Bytes; Kind = 'Folder'; Node = $child })
+    }
+    if ($Root.OwnBytes -gt 0) {
+        $rows.Add([PSCustomObject]@{ Name = "(files and small folders in $($Root.Path))"; Path = $Root.Path; Bytes = [long]$Root.OwnBytes; Kind = 'Folder'; Node = $null })
     }
 
-    $results = @()
-    $fso = New-Object -ComObject Scripting.FileSystemObject
-
-    try {
-        $folder = $fso.GetFolder($DirectoryPath)
-        $parentSize = 0
-        try {
-            $parentSize = $folder.Size
-        } catch {
-            $parentSize = 0
-        }
-
-        # Process Subfolders
-        foreach ($sub in $folder.SubFolders) {
-            $name = $sub.Name
-            $type = "DIR"
-            $rawSize = 0
-            $dispSize = "0 MB"
-            $itemCount = 0
-            $lastMod = ""
-
-            try {
-                $lastMod = $sub.DateLastModified.ToString("yyyy-MM-dd HH:mm")
-            } catch {
-                $lastMod = "-"
-            }
-
-            if ($name -match '^\$RECYCLE\.BIN$|^System Volume Information$') {
-                $results += [PSCustomObject]@{
-                    Name         = "[DIR] $name"
-                    RawName      = $name
-                    FullPath     = $sub.Path
-                    Type         = $type
-                    RawSize      = 0
-                    DisplaySize  = "<Protected>"
-                    Percent      = 0
-                    PercentStr   = "-"
-                    ItemCount    = "-"
-                    LastModified = $lastMod
-                    IsFolder     = $true
-                }
-                continue
-            }
-
-            try {
-                $rawSize = $sub.Size
-                $dispSize = Format-Bytes -Bytes $rawSize
-                try {
-                    $itemCount = $sub.Files.Count + $sub.SubFolders.Count
-                } catch {
-                    $itemCount = "-"
-                }
-            } catch {
-                $dispSize = "<Access Denied>"
-                $rawSize = 0
-            }
-
-            $pct = if ($parentSize -gt 0 -and $rawSize -gt 0) { [math]::Round(($rawSize / $parentSize) * 100, 1) } else { 0 }
-            $pctStr = if ($pct -gt 0) { "$pct %" } else { "< 0.1%" }
-
-            $results += [PSCustomObject]@{
-                Name         = "[DIR] $name"
-                RawName      = $name
-                FullPath     = $sub.Path
-                Type         = $type
-                RawSize      = $rawSize
-                DisplaySize  = $dispSize
-                Percent      = $pct
-                PercentStr   = $pctStr
-                ItemCount    = $itemCount
-                LastModified = $lastMod
-                IsFolder     = $true
-            }
-        }
-
-        # Process Direct Files
-        foreach ($file in $folder.Files) {
-            $name = $file.Name
-            $type = "FILE"
-            $rawSize = $file.Size
-            $dispSize = Format-Bytes -Bytes $rawSize
-            $lastMod = ""
-
-            try {
-                $lastMod = $file.DateLastModified.ToString("yyyy-MM-dd HH:mm")
-            } catch {
-                $lastMod = "-"
-            }
-
-            $pct = if ($parentSize -gt 0 -and $rawSize -gt 0) { [math]::Round(($rawSize / $parentSize) * 100, 1) } else { 0 }
-            $pctStr = if ($pct -gt 0) { "$pct %" } else { "< 0.1%" }
-
-            $results += [PSCustomObject]@{
-                Name         = "[FILE] $name"
-                RawName      = $name
-                FullPath     = $file.Path
-                Type         = $type
-                RawSize      = $rawSize
-                DisplaySize  = $dispSize
-                Percent      = $pct
-                PercentStr   = $pctStr
-                ItemCount    = "1 file"
-                LastModified = $lastMod
-                IsFolder     = $false
-            }
-        }
-    } catch {
-        # Fallback to .NET DirectoryInfo
-        try {
-            $dirInfo = New-Object System.IO.DirectoryInfo($DirectoryPath)
-            foreach ($sub in $dirInfo.GetDirectories()) {
-                $results += [PSCustomObject]@{
-                    Name         = "[DIR] $($sub.Name)"
-                    RawName      = $sub.Name
-                    FullPath     = $sub.FullName
-                    Type         = "DIR"
-                    RawSize      = 0
-                    DisplaySize  = "Folder"
-                    Percent      = 0
-                    PercentStr   = "-"
-                    ItemCount    = "-"
-                    LastModified = $sub.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
-                    IsFolder     = $true
-                }
-            }
-            foreach ($f in $dirInfo.GetFiles()) {
-                $results += [PSCustomObject]@{
-                    Name         = "[FILE] $($f.Name)"
-                    RawName      = $f.Name
-                    FullPath     = $f.FullName
-                    Type         = "FILE"
-                    RawSize      = $f.Length
-                    DisplaySize  = Format-Bytes -Bytes $f.Length
-                    Percent      = 0
-                    PercentStr   = "-"
-                    ItemCount    = "1 file"
-                    LastModified = $f.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
-                    IsFolder     = $false
-                }
-            }
-        } catch {}
+    $remainder = $UsedBytes - [long]$Root.Bytes
+    if ($remainder -gt 0) {
+        $kind = if ($Elevated) { 'Unreadable' } else { 'Protected' }
+        $name = if ($Elevated) { 'Unreadable or in use by Windows' } else { 'Protected areas (restart as administrator to break down)' }
+        $rows.Add([PSCustomObject]@{ Name = $name; Path = $null; Bytes = $remainder; Kind = $kind; Node = $null })
+    } elseif ($remainder -lt 0) {
+        $rows.Add([PSCustomObject]@{ Name = 'Windows shared files (counted once)'; Path = $null; Bytes = $remainder; Kind = 'Shared'; Node = $null })
     }
 
-    return ($results | Sort-Object RawSize -Descending)
+    $denominator = [math]::Max([long]1, $UsedBytes)
+    foreach ($r in $rows) { $r | Add-Member -NotePropertyName Percent -NotePropertyValue ([math]::Round(100.0 * $r.Bytes / $denominator, 1)) }
+    return @($rows | Sort-Object -Property @{ Expression = { if ($_.Kind -in 'Protected', 'Unreadable', 'Shared') { 1 } else { 0 } } }, @{ Expression = { $_.Bytes }; Descending = $true })
+}
+
+# Category totals for the stacked bar. A folder's own files count toward its category; children inherit it unless a longer prefix matches.
+function Get-SpaceCategory {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] $Root)
+
+    $profile = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile).TrimEnd('\')
+    $local   = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData).TrimEnd('\')
+    $roaming = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ApplicationData).TrimEnd('\')
+    $drive   = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') } else { 'C:' }
+    $windows = if ($env:SystemRoot) { $env:SystemRoot.TrimEnd('\') } else { "$drive\Windows" }
+    $pf      = if ($env:ProgramFiles) { $env:ProgramFiles.TrimEnd('\') } else { "$drive\Program Files" }
+    $pf86    = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)}.TrimEnd('\') } else { "$drive\Program Files (x86)" }
+    $pd      = if ($env:ProgramData) { $env:ProgramData.TrimEnd('\') } else { "$drive\ProgramData" }
+
+    $prefixes = New-Object System.Collections.Generic.List[object]
+    $add = { param($p, $c) if ($p) { $prefixes.Add(@($p.TrimEnd('\'), $c)) } }
+    foreach ($f in 'Documents', 'Desktop', 'Downloads', 'Pictures', 'Videos', 'Music') { & $add "$profile\$f" 'Your files' }
+    foreach ($p in $pf, $pf86, $pd, "$local\Programs", "$local\Packages", $roaming, $local) { & $add $p 'Apps and games' }
+    foreach ($f in 'Docker', 'Arduino15', 'Android', 'Python') { & $add "$local\$f" 'Developer tools' }
+    foreach ($f in 'npm', 'Code', 'Cursor', 'JetBrains', 'uv') { & $add "$roaming\$f" 'Developer tools' }
+    foreach ($p in $windows, "$drive\`$WinREAgent", "$drive\Recovery", "$drive\System Volume Information", "$drive\`$Windows.~BT", "$drive\`$Windows.~WS") { & $add $p 'Windows and system' }
+    foreach ($t in (Get-CleanableTargets)) { & $add $t.Path 'Caches and temp' }
+    & $add "$windows\Temp" 'Caches and temp'
+    & $add "$local\Temp" 'Caches and temp'
+
+    $sorted = @($prefixes | Sort-Object { $_[0].Length } -Descending)
+    $totals = @{ 'Apps and games' = 0L; 'Developer tools' = 0L; 'Windows and system' = 0L; 'Your files' = 0L; 'Caches and temp' = 0L; 'Other' = 0L }
+
+    $walk = {
+        param($node, $inherited)
+        $cat = $inherited
+        foreach ($p in $sorted) {
+            if ($node.Path.Length -ge $p[0].Length -and $node.Path.StartsWith($p[0], [System.StringComparison]::OrdinalIgnoreCase) -and
+                ($node.Path.Length -eq $p[0].Length -or $node.Path[$p[0].Length] -eq '\')) { $cat = $p[1]; break }
+        }
+        # Dot-folders in the profile (.gradle, .docker, .vscode, .codex ...) are developer tools
+        if ($cat -eq 'Other' -and $node.Path.StartsWith("$profile\.", [System.StringComparison]::OrdinalIgnoreCase)) { $cat = 'Developer tools' }
+        $totals[$cat] += [long]$node.OwnBytes
+        foreach ($child in $node.Children) { & $walk $child $cat }
+    }
+    & $walk $Root 'Other'
+    return $totals
+}
+
+# The folders worth looking at: stop at anything with a rule, step through plain containers (Users, AppData...), and
+# drill into a dominant child (70%+) so the list names "UpdateFramework" rather than "ProgramData".
+function Get-BiggestFolders {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] $Root, [int]$Max = 12, [long]$MinBytes = 100MB)
+
+    $profile = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile).TrimEnd('\')
+    $local   = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData).TrimEnd('\')
+    $roaming = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ApplicationData).TrimEnd('\')
+    $drive   = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') } else { 'C:' }
+    $containers = @{}
+    foreach ($c in @($Root.Path, "$drive\Users", $profile, "$profile\AppData", $local, "$local\Programs", "$local\Packages", $roaming,
+                     "$profile\AppData\LocalLow", $env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
+        if ($c) { $containers[$c.TrimEnd('\').ToLowerInvariant()] = $true }
+    }
+    $usersPrefix = "$drive\Users\".ToLowerInvariant()
+
+    $found = New-Object System.Collections.Generic.List[object]
+    $visit = {
+        param($node)
+        $key = $node.Path.TrimEnd('\').ToLowerInvariant()
+        if (Find-SpaceRule -Path $node.Path) { $found.Add($node); return }
+        # Another user's profile folder (C:\Users\name) is a container too
+        $isUserRoot = $key.StartsWith($usersPrefix) -and ($key.Substring($usersPrefix.Length) -notlike '*\*')
+        if ($containers.ContainsKey($key) -or $isUserRoot) {
+            foreach ($child in $node.Children) { & $visit $child }
+            return
+        }
+        # No single dominant child, but a top child has a rule (ProgramData\NVIDIA: NGX and Streamline): show those
+        if ($node.Children.Count -gt 1 -and $node.Children[0].Bytes -lt (0.7 * $node.Bytes) -and
+            @($node.Children | Select-Object -First 3 | Where-Object { Find-SpaceRule -Path $_.Path }).Count -gt 0) {
+            foreach ($child in $node.Children) { & $visit $child }
+            return
+        }
+        $pick = $node
+        while ($pick.Children.Count -gt 0 -and $pick.Children[0].Bytes -ge (0.7 * $pick.Bytes)) {
+            $pick = $pick.Children[0]
+            if (Find-SpaceRule -Path $pick.Path) { break }
+        }
+        $found.Add($pick)
+    }
+    & $visit $Root
+    return @($found | Where-Object { $_.Bytes -ge $MinBytes } | Sort-Object -Property @{ Expression = { $_.Bytes }; Descending = $true } | Select-Object -First $Max)
 }
 
 
 $embeddedXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Diskman - C: Drive Trash &amp; Storage Cleaner" 
+        Title="Diskman - drive space cleaner" 
         Height="800" Width="1140" 
         MinHeight="700" MinWidth="950"
         WindowStartupLocation="CenterScreen"
@@ -2090,6 +2841,16 @@ $embeddedXaml = @'
         <SolidColorBrush x:Key="AccentAmber" Color="#FFB703"/>
         <SolidColorBrush x:Key="AccentRed" Color="#E63946"/>
         <SolidColorBrush x:Key="ConsoleBg" Color="#0D0D0F"/>
+        <SolidColorBrush x:Key="TextPrimary" Color="#EDEDED"/>
+        <SolidColorBrush x:Key="TextSecondary" Color="#A1A1AA"/>
+        <SolidColorBrush x:Key="TextBody" Color="#D4D4D8"/>
+        <SolidColorBrush x:Key="SurfaceBg" Color="#16161A"/>
+        <SolidColorBrush x:Key="PanelBg" Color="#1C1C20"/>
+        <SolidColorBrush x:Key="CardSurface" Color="#1B1B1F"/>
+        <SolidColorBrush x:Key="Divider" Color="#27272A"/>
+        <SolidColorBrush x:Key="AccentStrong" Color="#0077B6"/>
+        <SolidColorBrush x:Key="InputBg" Color="#202026"/>
+        <SolidColorBrush x:Key="OnAccent" Color="#FFFFFF"/>
 
         <!-- Keyboard focus ring (visible for Tab navigation, hidden for mouse clicks) -->
         <Style x:Key="FocusRing">
@@ -2102,11 +2863,105 @@ $embeddedXaml = @'
             </Setter>
         </Style>
 
+        <!-- Dark scrollbars (the stock ones are light grey on this theme) -->
+        <Style x:Key="ScrollThumb" TargetType="Thumb">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Border x:Name="thumbBorder" Background="#4A4A52" CornerRadius="4" Margin="2"/>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="thumbBorder" Property="Background" Value="#6B6B75"/>
+                            </Trigger>
+                            <Trigger Property="IsDragging" Value="True">
+                                <Setter TargetName="thumbBorder" Property="Background" Value="{StaticResource AccentCyan}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="ScrollPage" TargetType="RepeatButton">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="ScrollBar">
+            <Setter Property="Background" Value="{StaticResource SurfaceBg}"/>
+            <Setter Property="Width" Value="12"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Border Background="{TemplateBinding Background}">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.DecreaseRepeatButton><RepeatButton Style="{StaticResource ScrollPage}" Command="ScrollBar.PageUpCommand"/></Track.DecreaseRepeatButton>
+                                <Track.Thumb><Thumb Style="{StaticResource ScrollThumb}"/></Track.Thumb>
+                                <Track.IncreaseRepeatButton><RepeatButton Style="{StaticResource ScrollPage}" Command="ScrollBar.PageDownCommand"/></Track.IncreaseRepeatButton>
+                            </Track>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="Orientation" Value="Horizontal">
+                    <Setter Property="Width" Value="Auto"/>
+                    <Setter Property="Height" Value="12"/>
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="ScrollBar">
+                                <Border Background="{TemplateBinding Background}">
+                                    <Track x:Name="PART_Track" IsDirectionReversed="False">
+                                        <Track.DecreaseRepeatButton><RepeatButton Style="{StaticResource ScrollPage}" Command="ScrollBar.PageLeftCommand"/></Track.DecreaseRepeatButton>
+                                        <Track.Thumb><Thumb Style="{StaticResource ScrollThumb}"/></Track.Thumb>
+                                        <Track.IncreaseRepeatButton><RepeatButton Style="{StaticResource ScrollPage}" Command="ScrollBar.PageRightCommand"/></Track.IncreaseRepeatButton>
+                                    </Track>
+                                </Border>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Breadcrumb link button -->
+        <Style x:Key="CrumbButton" TargetType="Button">
+            <Setter Property="Foreground" Value="{StaticResource AccentCyan}"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="6,3"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="crumbBorder" Background="Transparent" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="crumbBorder" Property="Background" Value="#25252C"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Section label above a block of content -->
+        <Style x:Key="SectionLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="10"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Foreground" Value="{StaticResource AccentCyan}"/>
+            <Setter Property="Margin" Value="0,0,0,6"/>
+        </Style>
+
         <!-- Standard Button Style -->
         <Style TargetType="Button">
             <Setter Property="Background" Value="#2A2A30"/>
-            <Setter Property="Foreground" Value="#EDEDED"/>
-            <Setter Property="BorderBrush" Value="#3F3F46"/>
+            <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderMedium}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="14,7"/>
             <Setter Property="FontSize" Value="12"/>
@@ -2122,10 +2977,10 @@ $embeddedXaml = @'
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="btnBorder" Property="Background" Value="#383842"/>
-                                <Setter TargetName="btnBorder" Property="BorderBrush" Value="#00B4D8"/>
+                                <Setter TargetName="btnBorder" Property="BorderBrush" Value="{StaticResource AccentCyan}"/>
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="btnBorder" Property="Background" Value="#1C1C20"/>
+                                <Setter TargetName="btnBorder" Property="Background" Value="{StaticResource PanelBg}"/>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter TargetName="btnBorder" Property="Opacity" Value="0.4"/>
@@ -2138,9 +2993,9 @@ $embeddedXaml = @'
 
         <!-- Primary Action Button (Cyan) -->
         <Style x:Key="PrimaryActionBtn" TargetType="Button">
-            <Setter Property="Background" Value="#0077B6"/>
-            <Setter Property="Foreground" Value="#FFFFFF"/>
-            <Setter Property="BorderBrush" Value="#00B4D8"/>
+            <Setter Property="Background" Value="{StaticResource AccentStrong}"/>
+            <Setter Property="Foreground" Value="{StaticResource OnAccent}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource AccentCyan}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="16,7"/>
             <Setter Property="FontSize" Value="12"/>
@@ -2173,7 +3028,7 @@ $embeddedXaml = @'
         <!-- Danger Button (Red) -->
         <Style x:Key="DangerActionBtn" TargetType="Button">
             <Setter Property="Background" Value="#9D0208"/>
-            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="Foreground" Value="{StaticResource OnAccent}"/>
             <Setter Property="BorderBrush" Value="#E63946"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="16,7"/>
@@ -2206,8 +3061,8 @@ $embeddedXaml = @'
 
         <!-- GroupBox Style -->
         <Style TargetType="GroupBox">
-            <Setter Property="Foreground" Value="#00B4D8"/>
-            <Setter Property="BorderBrush" Value="#333338"/>
+            <Setter Property="Foreground" Value="{StaticResource AccentCyan}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderDark}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="10"/>
             <Setter Property="Margin" Value="0"/>
@@ -2221,10 +3076,10 @@ $embeddedXaml = @'
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                            <Border Grid.Row="0" Background="#1C1C20" BorderBrush="#333338" BorderThickness="1,1,1,0" CornerRadius="6,6,0,0" Padding="12,6">
+                            <Border Grid.Row="0" Background="{StaticResource PanelBg}" BorderBrush="{StaticResource BorderDark}" BorderThickness="1,1,1,0" CornerRadius="6,6,0,0" Padding="12,6">
                                 <ContentPresenter ContentSource="Header" RecognizesAccessKey="True" SnapsToDevicePixels="True"/>
                             </Border>
-                            <Border Grid.Row="1" Background="#16161A" BorderBrush="#333338" BorderThickness="1" CornerRadius="0,0,6,6" Padding="{TemplateBinding Padding}">
+                            <Border Grid.Row="1" Background="{StaticResource SurfaceBg}" BorderBrush="{StaticResource BorderDark}" BorderThickness="1" CornerRadius="0,0,6,6" Padding="{TemplateBinding Padding}">
                                 <ContentPresenter SnapsToDevicePixels="True"/>
                             </Border>
                         </Grid>
@@ -2235,9 +3090,9 @@ $embeddedXaml = @'
 
         <!-- Flat Dark ProgressBar -->
         <Style TargetType="ProgressBar">
-            <Setter Property="Background" Value="#141416"/>
-            <Setter Property="Foreground" Value="#00B4D8"/>
-            <Setter Property="BorderBrush" Value="#333338"/>
+            <Setter Property="Background" Value="{StaticResource WinDarkBg}"/>
+            <Setter Property="Foreground" Value="{StaticResource AccentCyan}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderDark}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Template">
                 <Setter.Value>
@@ -2254,8 +3109,8 @@ $embeddedXaml = @'
 
         <!-- TabItem Fluent Style -->
         <Style TargetType="TabItem">
-            <Setter Property="Background" Value="#1C1C20"/>
-            <Setter Property="Foreground" Value="#A1A1AA"/>
+            <Setter Property="Background" Value="{StaticResource PanelBg}"/>
+            <Setter Property="Foreground" Value="{StaticResource TextSecondary}"/>
             <Setter Property="FontSize" Value="13"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Padding" Value="18,9"/>
@@ -2264,18 +3119,18 @@ $embeddedXaml = @'
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="TabItem">
-                        <Border x:Name="border" Background="{TemplateBinding Background}" BorderBrush="#333338" BorderThickness="1,1,1,0" CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}" Margin="0,0,4,0" SnapsToDevicePixels="True">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" BorderBrush="{StaticResource BorderDark}" BorderThickness="1,1,1,0" CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}" Margin="0,0,4,0" SnapsToDevicePixels="True">
                             <ContentPresenter ContentSource="Header" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="border" Property="Background" Value="#28282E"/>
-                                <Setter Property="Foreground" Value="#FFFFFF"/>
+                                <Setter Property="Foreground" Value="{StaticResource OnAccent}"/>
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
-                                <Setter TargetName="border" Property="Background" Value="#16161A"/>
-                                <Setter TargetName="border" Property="BorderBrush" Value="#00B4D8"/>
-                                <Setter Property="Foreground" Value="#00B4D8"/>
+                                <Setter TargetName="border" Property="Background" Value="{StaticResource SurfaceBg}"/>
+                                <Setter TargetName="border" Property="BorderBrush" Value="{StaticResource AccentCyan}"/>
+                                <Setter Property="Foreground" Value="{StaticResource AccentCyan}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -2288,7 +3143,7 @@ $embeddedXaml = @'
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="BorderBrush" Value="Transparent"/>
             <Setter Property="BorderThickness" Value="0"/>
-            <Setter Property="Foreground" Value="#EDEDED"/>
+            <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
             <Setter Property="Padding" Value="10,6"/>
             <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
             <Setter Property="Template">
@@ -2302,15 +3157,15 @@ $embeddedXaml = @'
             </Setter>
             <Style.Triggers>
                 <Trigger Property="IsSelected" Value="True">
-                    <Setter Property="Background" Value="#0077B6"/>
-                    <Setter Property="Foreground" Value="#FFFFFF"/>
+                    <Setter Property="Background" Value="{StaticResource AccentStrong}"/>
+                    <Setter Property="Foreground" Value="{StaticResource OnAccent}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <!-- DataGrid Row Style -->
         <Style TargetType="DataGridRow">
-            <Setter Property="Background" Value="#16161A"/>
+            <Setter Property="Background" Value="{StaticResource SurfaceBg}"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="SnapsToDevicePixels" Value="True"/>
             <Style.Triggers>
@@ -2318,20 +3173,20 @@ $embeddedXaml = @'
                     <Setter Property="Background" Value="#25252C"/>
                 </Trigger>
                 <Trigger Property="IsSelected" Value="True">
-                    <Setter Property="Background" Value="#0077B6"/>
-                    <Setter Property="Foreground" Value="#FFFFFF"/>
+                    <Setter Property="Background" Value="{StaticResource AccentStrong}"/>
+                    <Setter Property="Foreground" Value="{StaticResource OnAccent}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <!-- DataGrid Style -->
         <Style TargetType="DataGrid">
-            <Setter Property="Background" Value="#16161A"/>
-            <Setter Property="Foreground" Value="#EDEDED"/>
-            <Setter Property="BorderBrush" Value="#333338"/>
+            <Setter Property="Background" Value="{StaticResource SurfaceBg}"/>
+            <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderDark}"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="RowBackground" Value="#16161A"/>
-            <Setter Property="AlternatingRowBackground" Value="#1C1C20"/>
+            <Setter Property="RowBackground" Value="{StaticResource SurfaceBg}"/>
+            <Setter Property="AlternatingRowBackground" Value="{StaticResource PanelBg}"/>
             <Setter Property="GridLinesVisibility" Value="Horizontal"/>
             <Setter Property="HorizontalGridLinesBrush" Value="#26262B"/>
             <Setter Property="HeadersVisibility" Value="Column"/>
@@ -2344,17 +3199,17 @@ $embeddedXaml = @'
 
         <!-- DataGrid Column Header Style -->
         <Style TargetType="DataGridColumnHeader">
-            <Setter Property="Background" Value="#202026"/>
-            <Setter Property="Foreground" Value="#A1A1AA"/>
+            <Setter Property="Background" Value="{StaticResource InputBg}"/>
+            <Setter Property="Foreground" Value="{StaticResource TextSecondary}"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Padding" Value="10,7"/>
-            <Setter Property="BorderBrush" Value="#333338"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderDark}"/>
             <Setter Property="BorderThickness" Value="0,0,1,1"/>
         </Style>
 
         <!-- ComboBox Dark Style (full template: the stock one ignores Background and renders white) -->
         <Style TargetType="ComboBoxItem">
-            <Setter Property="Foreground" Value="#EDEDED"/>
+            <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
             <Setter Property="Padding" Value="10,6"/>
             <Setter Property="Template">
                 <Setter.Value>
@@ -2367,7 +3222,7 @@ $embeddedXaml = @'
                                 <Setter TargetName="itemBorder" Property="Background" Value="#2A2A30"/>
                             </Trigger>
                             <Trigger Property="IsHighlighted" Value="True">
-                                <Setter TargetName="itemBorder" Property="Background" Value="#0077B6"/>
+                                <Setter TargetName="itemBorder" Property="Background" Value="{StaticResource AccentStrong}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -2376,9 +3231,9 @@ $embeddedXaml = @'
         </Style>
 
         <Style TargetType="ComboBox">
-            <Setter Property="Background" Value="#202026"/>
-            <Setter Property="Foreground" Value="#EDEDED"/>
-            <Setter Property="BorderBrush" Value="#3F3F46"/>
+            <Setter Property="Background" Value="{StaticResource InputBg}"/>
+            <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderMedium}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="6,3"/>
             <Setter Property="FontSize" Value="12"/>
@@ -2394,11 +3249,11 @@ $embeddedXaml = @'
                                                 BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType=ComboBox}}"
                                                 BorderThickness="1" CornerRadius="5">
                                             <Path HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,9,0"
-                                                  Data="M0,0 L4,4 L8,0" Stroke="#A1A1AA" StrokeThickness="1.5"/>
+                                                  Data="M0,0 L4,4 L8,0" Stroke="{StaticResource TextSecondary}" StrokeThickness="1.5"/>
                                         </Border>
                                         <ControlTemplate.Triggers>
                                             <Trigger Property="IsMouseOver" Value="True">
-                                                <Setter TargetName="box" Property="BorderBrush" Value="#00B4D8"/>
+                                                <Setter TargetName="box" Property="BorderBrush" Value="{StaticResource AccentCyan}"/>
                                             </Trigger>
                                         </ControlTemplate.Triggers>
                                     </ControlTemplate>
@@ -2408,7 +3263,7 @@ $embeddedXaml = @'
                                               Margin="10,3,28,3" VerticalAlignment="Center" HorizontalAlignment="Left"/>
                             <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
                                 <Border MinWidth="{TemplateBinding ActualWidth}" MaxHeight="{TemplateBinding MaxDropDownHeight}" Margin="0,2,0,0"
-                                        Background="#202026" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="5">
+                                        Background="{StaticResource InputBg}" BorderBrush="{StaticResource BorderMedium}" BorderThickness="1" CornerRadius="5">
                                     <ScrollViewer>
                                         <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Contained"/>
                                     </ScrollViewer>
@@ -2449,18 +3304,18 @@ $embeddedXaml = @'
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock Text="Diskman" FontSize="20" FontWeight="Bold" Foreground="#00B4D8" VerticalAlignment="Center"/>
-                    <TextBlock Text="  |  C: Drive Storage Cleaner &amp; Junk Purger" FontSize="13" Foreground="#A1A1AA" VerticalAlignment="Center"/>
+                    <TextBlock Text="Diskman" FontSize="20" FontWeight="Bold" Foreground="{StaticResource AccentCyan}" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="TxtBrandSub" Text="  |  Drive space cleaner" FontSize="13" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button x:Name="BtnTopRefresh" Content="Refresh Stats" Margin="0,0,8,0"/>
-                    <Button x:Name="BtnTopQuickScan" Content="Scan C: Drive Junk" Style="{StaticResource PrimaryActionBtn}"/>
+                    <Button x:Name="BtnRestartAdmin" Content="Restart as Administrator" Margin="0,0,8,0" ToolTip="Needed to measure and clean system areas such as shadow copies and the component store"/>
+                    <Button x:Name="BtnTopQuickScan" Content="Rescan" Style="{StaticResource PrimaryActionBtn}" ToolTip="Scan the whole drive again"/>
                 </StackPanel>
             </Grid>
 
             <!-- C: Drive Real-Time Metrics Strip -->
-            <Border Grid.Row="1" Background="#1C1C20" BorderBrush="#333338" BorderThickness="1" CornerRadius="6" Padding="14,10">
+            <Border Grid.Row="1" Background="{StaticResource PanelBg}" BorderBrush="{StaticResource BorderDark}" BorderThickness="1" CornerRadius="6" Padding="14,10">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="140"/>
@@ -2471,18 +3326,18 @@ $embeddedXaml = @'
                     </Grid.ColumnDefinitions>
 
                     <StackPanel Grid.Column="0" Margin="0,0,10,0">
-                        <TextBlock Text="C: Total Capacity" Foreground="#A1A1AA" FontSize="11"/>
-                        <TextBlock x:Name="TxtCDriveTotal" Text="Calculating..." FontSize="15" FontWeight="Bold" Foreground="#EDEDED" Margin="0,2,0,0"/>
+                        <TextBlock Text="Total capacity" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                        <TextBlock x:Name="TxtCDriveTotal" Text="Calculating..." FontSize="15" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,2,0,0"/>
                     </StackPanel>
 
                     <StackPanel Grid.Column="1" Margin="0,0,10,0">
-                        <TextBlock Text="C: Used Storage" Foreground="#A1A1AA" FontSize="11"/>
-                        <TextBlock x:Name="TxtCDriveUsed" Text="Calculating..." FontSize="15" FontWeight="Bold" Foreground="#FFB703" Margin="0,2,0,0"/>
+                        <TextBlock Text="Used" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                        <TextBlock x:Name="TxtCDriveUsed" Text="Calculating..." FontSize="15" FontWeight="Bold" Foreground="{StaticResource AccentAmber}" Margin="0,2,0,0"/>
                     </StackPanel>
 
                     <StackPanel Grid.Column="2" Margin="0,0,10,0">
-                        <TextBlock Text="C: Free Available" Foreground="#A1A1AA" FontSize="11"/>
-                        <TextBlock x:Name="TxtCDriveFree" Text="Calculating..." FontSize="15" FontWeight="Bold" Foreground="#2EC4B6" Margin="0,2,0,0"/>
+                        <TextBlock Text="Free" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                        <TextBlock x:Name="TxtCDriveFree" Text="Calculating..." FontSize="15" FontWeight="Bold" Foreground="{StaticResource AccentTeal}" Margin="0,2,0,0"/>
                     </StackPanel>
 
                     <!-- Drive Meter Bar -->
@@ -2492,25 +3347,120 @@ $embeddedXaml = @'
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock x:Name="TxtCBarStatus" Grid.Column="0" Text="Drive C: Volume" FontSize="11" Foreground="#A1A1AA" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
-                            <TextBlock x:Name="TxtCBarPercent" Grid.Column="1" Text="-- % used" FontSize="11" FontWeight="Bold" Foreground="#00B4D8"/>
+                            <TextBlock x:Name="TxtCBarStatus" Grid.Column="0" Text="Drive volume" FontSize="11" Foreground="{StaticResource TextSecondary}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
+                            <TextBlock x:Name="TxtCBarPercent" Grid.Column="1" Text="-- % used" FontSize="11" FontWeight="Bold" Foreground="{StaticResource AccentCyan}"/>
                         </Grid>
-                        <ProgressBar x:Name="ProgressCDrive" Height="10" Value="50" Maximum="100"/>
+                        <ProgressBar x:Name="ProgressCDrive" AutomationProperties.Name="Drive space used" Height="10" Value="50" Maximum="100"/>
                     </StackPanel>
 
                     <StackPanel Grid.Column="4" HorizontalAlignment="Right" VerticalAlignment="Center">
-                        <TextBlock Text="Reclaimable Junk on C:" Foreground="#A1A1AA" FontSize="11" HorizontalAlignment="Right"/>
-                        <TextBlock x:Name="TxtCReclaimable" Text="Scanning..." FontSize="16" FontWeight="Bold" Foreground="#00B4D8" HorizontalAlignment="Right" Margin="0,2,0,0"/>
+                        <TextBlock Text="Found by the Cleaner" Foreground="{StaticResource TextSecondary}" FontSize="11" HorizontalAlignment="Right"/>
+                        <TextBlock x:Name="TxtCReclaimable" Text="Scanning..." FontSize="16" FontWeight="Bold" Foreground="{StaticResource AccentCyan}" HorizontalAlignment="Right" Margin="0,2,0,0"/>
                     </StackPanel>
                 </Grid>
             </Border>
         </Grid>
 
         <!-- Main TabControl -->
-        <TabControl x:Name="MainTabControl" Grid.Row="1" Background="#16161A" BorderBrush="#333338" BorderThickness="1">
+        <TabControl x:Name="MainTabControl" Grid.Row="1" Background="{StaticResource SurfaceBg}" BorderBrush="{StaticResource BorderDark}" BorderThickness="1">
+
+            <!-- OVERVIEW: why is my drive full, and what can I do now -->
+            <TabItem x:Name="TabOverview" Header="Overview">
+                <Grid Margin="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="340"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Left: verdict, scan progress, where it went, biggest folders -->
+                    <Grid Grid.Column="0" Margin="0,0,12,0">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Grid.Row="0" Margin="0,0,0,8">
+                            <TextBlock x:Name="TxtOverviewVerdict" Text="Reading your drive..." FontSize="16" FontWeight="SemiBold" Foreground="{StaticResource TextPrimary}" TextWrapping="Wrap"/>
+                            <TextBlock x:Name="TxtOverviewSub" Text="" FontSize="11" Foreground="{StaticResource TextSecondary}" TextTrimming="CharacterEllipsis" Margin="0,3,0,0"/>
+                        </StackPanel>
+
+                        <Border x:Name="PanelScan" Grid.Row="1" Visibility="Collapsed" Background="{StaticResource CardSurface}" BorderBrush="{StaticResource BorderDark}" BorderThickness="1" CornerRadius="6" Padding="12,8" Margin="0,0,0,10">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="TxtScanProgress" Grid.Column="0" Text="" Foreground="{StaticResource TextBody}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                <Button x:Name="BtnCancelScan" Grid.Column="1" Content="Cancel scan" Margin="12,0,0,0"/>
+                            </Grid>
+                        </Border>
+
+                        <StackPanel Grid.Row="2" Margin="0,0,0,10">
+                            <TextBlock Text="WHERE YOUR SPACE WENT" Style="{StaticResource SectionLabel}"/>
+                            <Border CornerRadius="4" Background="#22222A" Height="16" ClipToBounds="True">
+                                <Grid x:Name="BarCategories" AutomationProperties.Name="Space by category"/>
+                            </Border>
+                            <WrapPanel x:Name="PanelLegend" Margin="0,8,0,0"/>
+                        </StackPanel>
+
+                        <TextBlock Grid.Row="3" Text="BIGGEST FOLDERS" Style="{StaticResource SectionLabel}"/>
+
+                        <Grid Grid.Row="4">
+                            <DataGrid x:Name="GridTopFolders" AutoGenerateColumns="False" IsReadOnly="True" AutomationProperties.Name="Biggest folders">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Folder" Binding="{Binding Display}" Width="*" FontWeight="SemiBold">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="ToolTip" Value="{Binding Path}"/>
+                                                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="Bytes" Width="90" FontWeight="Bold" Foreground="{StaticResource AccentCyan}"/>
+                                    <DataGridTextColumn Header="% of drive" Binding="{Binding PctText}" SortMemberPath="PctValue" Width="70"/>
+                                    <DataGridTextColumn Header="What to do" Binding="{Binding Insight}" Width="190"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock x:Name="TxtEmptyTop" Text="Biggest folders appear here as the scan finds them." Foreground="{StaticResource TextSecondary}" FontSize="13" TextAlignment="Center" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"/>
+                        </Grid>
+
+                        <Border Grid.Row="5" Margin="0,8,0,0" Background="{StaticResource CardSurface}" BorderBrush="{StaticResource BorderDark}" BorderThickness="1" CornerRadius="6" Padding="10,6">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="TxtOverviewSelected" Grid.Column="0" Text="Select a folder to see what it is and what you can do about it." Foreground="{StaticResource TextBody}" FontSize="11" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxHeight="32" VerticalAlignment="Center"/>
+                                <Button x:Name="BtnOverviewOpen" Grid.Column="1" Content="Open in Explorer" Margin="12,0,6,0" IsEnabled="False"/>
+                                <Button x:Name="BtnOverviewAction" Grid.Column="2" Content="Action" Style="{StaticResource PrimaryActionBtn}" IsEnabled="False"/>
+                            </Grid>
+                        </Border>
+                    </Grid>
+
+                    <!-- Right: one-click win, ranked actions, Windows-managed space -->
+                    <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
+                            <Button x:Name="BtnFreeSafely" Content="Free space safely" Style="{StaticResource PrimaryActionBtn}" Padding="16,10" FontSize="14" IsEnabled="False"/>
+                            <TextBlock x:Name="TxtFreeSafelyNote" Text="Waiting for the scan..." Foreground="{StaticResource TextSecondary}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,8"/>
+                            <TextBlock x:Name="TxtAdminHint" Text="" Visibility="Collapsed" Foreground="{StaticResource AccentAmber}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,14"/>
+
+                            <TextBlock Text="RECOMMENDED ACTIONS" Style="{StaticResource SectionLabel}"/>
+                            <StackPanel x:Name="PanelActions" Margin="0,0,0,14"/>
+
+                            <TextBlock Text="WINDOWS-MANAGED SPACE" Style="{StaticResource SectionLabel}"/>
+                            <StackPanel x:Name="PanelSystemSpace"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </TabItem>
 
             <!-- TAB 1: C: DRIVE JUNK CLEANER (PRIMARY VIEW) -->
-            <TabItem Header="  C: Drive Junk Cleaner  ">
+            <TabItem x:Name="TabCleaner" Header="Cleaner">
                 <Grid Margin="12">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -2535,7 +3485,7 @@ $embeddedXaml = @'
 
                             <!-- Right Scan & Clean Buttons -->
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                <TextBlock x:Name="TxtCleanSelectedBadge" Text="Selected: 0 B (0 categories)" FontWeight="Bold" Foreground="#00B4D8" VerticalAlignment="Center" Margin="0,0,12,0" FontSize="13"/>
+                                <TextBlock x:Name="TxtCleanSelectedBadge" Text="Selected: 0 B (0 categories)" FontWeight="Bold" Foreground="{StaticResource AccentCyan}" VerticalAlignment="Center" Margin="0,0,12,0" FontSize="13"/>
                                 <Button x:Name="BtnScanCleanable" Content="Scan Junk" Margin="0,0,8,0"/>
                                 <Button x:Name="BtnRunCleanup" Content="Clean Selected Junk" Style="{StaticResource DangerActionBtn}"/>
                             </StackPanel>
@@ -2543,7 +3493,7 @@ $embeddedXaml = @'
 
                         <!-- Filter Chips (the active chip is highlighted from app.ps1) -->
                         <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                            <TextBlock Text="Filter:" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11"/>
+                            <TextBlock Text="Filter:" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11"/>
                             <Button x:Name="BtnFilterAll" Content="All" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
                             <Button x:Name="BtnFilterSystem" Content="System" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
                             <Button x:Name="BtnFilterGaming" Content="Gaming &amp; GPU" Margin="0,0,4,0" Padding="9,5" FontSize="11"/>
@@ -2553,7 +3503,7 @@ $embeddedXaml = @'
                     </StackPanel>
 
                     <!-- Junk Categories DataGrid -->
-                    <DataGrid x:Name="GridCleanableCategories" Grid.Row="1" AutoGenerateColumns="False"
+                    <DataGrid x:Name="GridCleanableCategories" AutomationProperties.Name="Cleanup categories" Grid.Row="1" AutoGenerateColumns="False"
                               CanUserAddRows="False" CanUserDeleteRows="False" CanUserResizeRows="False"
                               VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.ScrollUnit="Pixel">
                         <DataGrid.Columns>
@@ -2561,21 +3511,21 @@ $embeddedXaml = @'
                             <DataGridTemplateColumn Header="Clean?" Width="55">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
-                                        <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding CanSelect}" ToolTip="{Binding SelectTip}" AutomationProperties.Name="Clean this category" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
                             <DataGridTextColumn Header="Category" Binding="{Binding DisplayName}" Width="270" FontWeight="SemiBold"/>
                             <DataGridTextColumn Header="Group" Binding="{Binding Group}" Width="140"/>
-                            <DataGridTextColumn Header="Size on C:" Binding="{Binding DisplaySize}" SortMemberPath="RawBytes" SortDirection="Descending" Width="105" FontWeight="Bold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="RawBytes" SortDirection="Descending" Width="105" FontWeight="Bold" Foreground="{StaticResource AccentCyan}"/>
                             <DataGridTextColumn Header="Items" Binding="{Binding FileCount}" SortMemberPath="RawCount" Width="95"/>
                             <DataGridTextColumn Header="Safety" Binding="{Binding SafetyLevel}" Width="100"/>
-                            <DataGridTextColumn Header="Path on C: Drive" Binding="{Binding Target}" Width="*"/>
+                            <DataGridTextColumn Header="Path" Binding="{Binding Target}" Width="*"><DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding Target}"/><Setter Property="TextTrimming" Value="CharacterEllipsis"/></Style></DataGridTextColumn.ElementStyle></DataGridTextColumn>
                         </DataGrid.Columns>
                     </DataGrid>
 
                     <!-- Category Safety & Deletion Details Card (Fixed Height = Zero Layout Shift) -->
-                    <Border Grid.Row="2" Height="116" Background="#1B1B1F" BorderBrush="#333338" BorderThickness="1" CornerRadius="6" Margin="0,10,0,0" Padding="12,10">
+                    <Border Grid.Row="2" Height="116" Background="{StaticResource CardSurface}" BorderBrush="{StaticResource BorderDark}" BorderThickness="1" CornerRadius="6" Margin="0,10,0,0" Padding="12,10">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -2591,11 +3541,11 @@ $embeddedXaml = @'
                                 </Grid.ColumnDefinitions>
 
                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                    <TextBlock x:Name="TxtSelectedCategoryTitle" Text="Category Details &amp; Safety Profile" FontWeight="Bold" FontSize="13" Foreground="#EDEDED" VerticalAlignment="Center"/>
-                                    <Border x:Name="BadgeSafetyLevel" Background="#2EC4B6" CornerRadius="3" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center" MinWidth="68">
-                                        <TextBlock x:Name="TxtSelectedCategorySafetyBadge" Text="SAFE" FontSize="10" FontWeight="Bold" Foreground="#141416" TextAlignment="Center" HorizontalAlignment="Center"/>
+                                    <TextBlock x:Name="TxtSelectedCategoryTitle" Text="Category Details &amp; Safety Profile" FontWeight="Bold" FontSize="13" Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"/>
+                                    <Border x:Name="BadgeSafetyLevel" Background="{StaticResource AccentTeal}" CornerRadius="3" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center" MinWidth="68">
+                                        <TextBlock x:Name="TxtSelectedCategorySafetyBadge" Text="SAFE" FontSize="10" FontWeight="Bold" Foreground="{StaticResource WinDarkBg}" TextAlignment="Center" HorizontalAlignment="Center"/>
                                     </Border>
-                                    <TextBlock x:Name="TxtSelectedCategorySizeInfo" Text="" Foreground="#A1A1AA" FontSize="12" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="TxtSelectedCategorySizeInfo" Text="" Foreground="{StaticResource TextSecondary}" FontSize="12" Margin="10,0,0,0" VerticalAlignment="Center"/>
                                 </StackPanel>
 
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
@@ -2606,7 +3556,7 @@ $embeddedXaml = @'
                             </Grid>
 
                             <!-- Divider -->
-                            <Rectangle Grid.Row="1" Height="1" Fill="#27272A" Margin="0,8,0,8"/>
+                            <Rectangle Grid.Row="1" Height="1" Fill="{StaticResource Divider}" Margin="0,8,0,8"/>
 
                             <!-- 3-Column Explanations Grid: What Gets Deleted | Why It's Safe & Protected | Consequences & Rebuild -->
                             <Grid Grid.Row="2">
@@ -2617,31 +3567,31 @@ $embeddedXaml = @'
                                 </Grid.ColumnDefinitions>
 
                                 <!-- Column 1: What Gets Deleted -->
-                                <Border Grid.Column="0" Background="#141416" BorderBrush="#27272A" BorderThickness="1" CornerRadius="4" Padding="10,8" Margin="0,0,6,0">
+                                <Border Grid.Column="0" Background="{StaticResource WinDarkBg}" BorderBrush="{StaticResource Divider}" BorderThickness="1" CornerRadius="4" Padding="10,8" Margin="0,0,6,0">
                                     <DockPanel LastChildFill="True">
-                                        <TextBlock DockPanel.Dock="Top" Text="TARGET FILES &amp; DATA" FontSize="10" FontWeight="Bold" Foreground="#00B4D8" Margin="0,0,0,4"/>
+                                        <TextBlock DockPanel.Dock="Top" Text="TARGET FILES &amp; DATA" FontSize="10" FontWeight="Bold" Foreground="{StaticResource AccentCyan}" Margin="0,0,0,4"/>
                                         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Background="Transparent">
-                                            <TextBlock x:Name="TxtCategoryWhatDeleted" Text="Select a category above to view specific target file types and paths." FontSize="11" Foreground="#D4D4D8" TextWrapping="Wrap"/>
+                                            <TextBlock x:Name="TxtCategoryWhatDeleted" Text="Select a category above to view specific target file types and paths." FontSize="11" Foreground="{StaticResource TextBody}" TextWrapping="Wrap"/>
                                         </ScrollViewer>
                                     </DockPanel>
                                 </Border>
 
                                 <!-- Column 2: Why It's Safe & Protected Data -->
-                                <Border Grid.Column="1" Background="#141416" BorderBrush="#27272A" BorderThickness="1" CornerRadius="4" Padding="10,8" Margin="3,0,3,0">
+                                <Border Grid.Column="1" Background="{StaticResource WinDarkBg}" BorderBrush="{StaticResource Divider}" BorderThickness="1" CornerRadius="4" Padding="10,8" Margin="3,0,3,0">
                                     <DockPanel LastChildFill="True">
-                                        <TextBlock DockPanel.Dock="Top" Text="SAFETY &amp; PROTECTED DATA" FontSize="10" FontWeight="Bold" Foreground="#2EC4B6" Margin="0,0,0,4"/>
+                                        <TextBlock DockPanel.Dock="Top" Text="SAFETY &amp; PROTECTED DATA" FontSize="10" FontWeight="Bold" Foreground="{StaticResource AccentTeal}" Margin="0,0,0,4"/>
                                         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Background="Transparent">
-                                            <TextBlock x:Name="TxtCategorySafetyExp" Text="Personal documents, passwords, credentials, and settings are never touched." FontSize="11" Foreground="#D4D4D8" TextWrapping="Wrap"/>
+                                            <TextBlock x:Name="TxtCategorySafetyExp" Text="Personal documents, passwords, credentials, and settings are never touched." FontSize="11" Foreground="{StaticResource TextBody}" TextWrapping="Wrap"/>
                                         </ScrollViewer>
                                     </DockPanel>
                                 </Border>
 
                                 <!-- Column 3: Post-Deletion Consequences -->
-                                <Border Grid.Column="2" Background="#141416" BorderBrush="#27272A" BorderThickness="1" CornerRadius="4" Padding="10,8" Margin="6,0,0,0">
+                                <Border Grid.Column="2" Background="{StaticResource WinDarkBg}" BorderBrush="{StaticResource Divider}" BorderThickness="1" CornerRadius="4" Padding="10,8" Margin="6,0,0,0">
                                     <DockPanel LastChildFill="True">
-                                        <TextBlock DockPanel.Dock="Top" Text="POST-CLEANUP IMPACT" FontSize="10" FontWeight="Bold" Foreground="#FFB703" Margin="0,0,0,4"/>
+                                        <TextBlock DockPanel.Dock="Top" Text="POST-CLEANUP IMPACT" FontSize="10" FontWeight="Bold" Foreground="{StaticResource AccentAmber}" Margin="0,0,0,4"/>
                                         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Background="Transparent">
-                                            <TextBlock x:Name="TxtCategoryConsequences" Text="Explains whether files auto-regenerate or require network reload." FontSize="11" Foreground="#D4D4D8" TextWrapping="Wrap"/>
+                                            <TextBlock x:Name="TxtCategoryConsequences" Text="Explains whether files auto-regenerate or require network reload." FontSize="11" Foreground="{StaticResource TextBody}" TextWrapping="Wrap"/>
                                         </ScrollViewer>
                                     </DockPanel>
                                 </Border>
@@ -2651,8 +3601,8 @@ $embeddedXaml = @'
                 </Grid>
             </TabItem>
 
-            <!-- TAB 2: DETAILED FILE INSPECTOR (C: JUNK FILES) -->
-            <TabItem Header="  File Inspector (C: Junk Files)  ">
+            <!-- SPACE EXPLORER: drill down through the scanned tree -->
+            <TabItem x:Name="TabExplorer" Header="Space Explorer">
                 <Grid Margin="12">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -2660,50 +3610,62 @@ $embeddedXaml = @'
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
-                    <!-- Selector Bar -->
-                    <Grid Grid.Row="0" Margin="0,0,0,10">
+                    <Grid Grid.Row="0" Margin="0,0,0,8">
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="280"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
-
-                        <TextBlock Grid.Column="0" Text="Junk Category: " Foreground="#A1A1AA" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                        <ComboBox x:Name="CmbInspectTarget" Grid.Column="1" Height="28" Margin="0,0,8,0"/>
-                        <Button x:Name="BtnRefreshInspectFiles" Grid.Column="2" Content="Load Files" Margin="0,0,12,0"/>
-                        <TextBlock x:Name="TxtInspectSummary" Grid.Column="3" Text="Select a category and click Load Files to inspect individual files." Foreground="#2EC4B6" VerticalAlignment="Center" HorizontalAlignment="Right" FontWeight="SemiBold"/>
+                        <Button x:Name="BtnSpaceUp" Grid.Column="0" Content="Up" Margin="0,0,8,0" ToolTip="Go to the parent folder (Backspace)"/>
+                        <WrapPanel x:Name="PanelCrumbs" Grid.Column="1" VerticalAlignment="Center" AutomationProperties.Name="Folder path"/>
                     </Grid>
 
-                    <!-- File Items Table -->
-                    <DataGrid x:Name="GridInspectFiles" Grid.Row="1" AutoGenerateColumns="False">
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="File Name" Binding="{Binding Name}" Width="250"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="RawBytes" SortDirection="Descending" Width="100" FontWeight="SemiBold" Foreground="#00B4D8"/>
-                            <DataGridTextColumn Header="Full Path on C: Drive" Binding="{Binding FullPath}" Width="*"/>
-                            <DataGridTextColumn Header="Last Modified" Binding="{Binding LastWriteTime}" Width="140"/>
-                        </DataGrid.Columns>
-                    </DataGrid>
-
-                    <!-- Action Bar -->
-                    <Grid Grid.Row="2" Margin="0,10,0,0">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-
-                        <TextBlock x:Name="TxtSelectedInspectFileInfo" Grid.Column="0" Text="Select a file to inspect or delete." Foreground="#A1A1AA" FontSize="11" VerticalAlignment="Center"/>
-                        <Button x:Name="BtnRevealInspectFileInExplorer" Grid.Column="1" Content="Reveal in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,8,0"/>
-                        <Button x:Name="BtnDeleteSingleInspectFile" Grid.Column="2" Content="Delete File" Margin="0,0,8,0"/>
-                        <Button x:Name="BtnPurgeAllInspectFiles" Grid.Column="3" Content="Clear All Files in Target" Style="{StaticResource DangerActionBtn}"/>
+                    <Grid Grid.Row="1">
+                        <DataGrid x:Name="GridSpace" AutoGenerateColumns="False" IsReadOnly="True" AutomationProperties.Name="Folders and sizes">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*" FontWeight="SemiBold">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="ToolTip" Value="{Binding Path}"/>
+                                            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="Bytes" Width="90" FontWeight="Bold" Foreground="{StaticResource AccentCyan}"/>
+                                <DataGridTemplateColumn Header="Share of folder" Width="130" SortMemberPath="PctValue">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <ProgressBar Value="{Binding PctValue, Mode=OneWay}" Maximum="100" Height="8" Margin="4,0" AutomationProperties.Name="Share of parent folder"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTextColumn Header="%" Binding="{Binding PctText}" SortMemberPath="PctValue" Width="60"/>
+                                <DataGridTextColumn Header="Files" Binding="{Binding FilesText}" SortMemberPath="Files" Width="90"/>
+                                <DataGridTextColumn Header="Newest change" Binding="{Binding Modified}" Width="110"/>
+                                <DataGridTextColumn Header="What to do" Binding="{Binding Insight}" Width="190"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <TextBlock x:Name="TxtEmptyExplorer" Text="The folder tree appears here when the scan finishes." Foreground="{StaticResource TextSecondary}" FontSize="13" TextAlignment="Center" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"/>
                     </Grid>
+
+                    <Border Grid.Row="2" Margin="0,8,0,0" Background="{StaticResource CardSurface}" BorderBrush="{StaticResource BorderDark}" BorderThickness="1" CornerRadius="6" Padding="12,8">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="TxtSpaceSelected" Grid.Column="0" Text="Select a row. Enter opens a folder, Backspace goes up." Foreground="{StaticResource TextBody}" FontSize="12" TextWrapping="Wrap" VerticalAlignment="Center" MinHeight="34"/>
+                            <Button x:Name="BtnSpaceOpen" Grid.Column="1" Content="Open in Explorer" Margin="12,0,6,0" IsEnabled="False"/>
+                            <Button x:Name="BtnSpaceCopy" Grid.Column="2" Content="Copy path" Margin="0,0,6,0" IsEnabled="False"/>
+                            <Button x:Name="BtnSpaceAction" Grid.Column="3" Content="Action" Style="{StaticResource PrimaryActionBtn}" IsEnabled="False"/>
+                        </Grid>
+                    </Border>
                 </Grid>
             </TabItem>
 
             <!-- TAB 3: C: LARGE JUNK & INSTALLERS HUNTER -->
-            <TabItem Header="  C: Large Files Hunter  ">
+            <TabItem x:Name="TabHunter" Header="Large Files">
                 <Grid Margin="12">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -2721,28 +3683,31 @@ $embeddedXaml = @'
                         </Grid.ColumnDefinitions>
 
                         <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,12,0" VerticalAlignment="Center">
-                            <TextBlock Text="Min Size: " Foreground="#A1A1AA" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="CmbHunterSize" Width="100" Height="28" Margin="6,0,0,0"/>
+                            <TextBlock Text="Min Size: " Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="CmbHunterSize" AutomationProperties.Name="Minimum file size" Width="100" Height="28" Margin="6,0,0,0"/>
                         </StackPanel>
 
                         <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,0,12,0" VerticalAlignment="Center">
-                            <TextBlock Text="Category: " Foreground="#A1A1AA" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="CmbHunterCategory" Width="150" Height="28" Margin="6,0,0,0"/>
+                            <TextBlock Text="Category: " Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="CmbHunterCategory" AutomationProperties.Name="File category" Width="150" Height="28" Margin="6,0,0,0"/>
                         </StackPanel>
 
-                        <Button x:Name="BtnStartHunterScan" Grid.Column="3" Content="Scan Large C: Files" Style="{StaticResource PrimaryActionBtn}"/>
+                        <Button x:Name="BtnStartHunterScan" Grid.Column="3" Content="Scan Large Files" Style="{StaticResource PrimaryActionBtn}"/>
                     </Grid>
 
                     <!-- Table -->
-                    <DataGrid x:Name="GridLargeFiles" Grid.Row="1" AutoGenerateColumns="False">
+                    <Grid Grid.Row="1">
+                    <DataGrid x:Name="GridLargeFiles" AutomationProperties.Name="Large files" AutoGenerateColumns="False">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="File Name" Binding="{Binding Name}" Width="240"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="RawSize" SortDirection="Descending" Width="100" FontWeight="Bold" Foreground="#00B4D8"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="RawSize" SortDirection="Descending" Width="100" FontWeight="Bold" Foreground="{StaticResource AccentCyan}"/>
                             <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="140"/>
-                            <DataGridTextColumn Header="Full Path on C: Drive" Binding="{Binding FullPath}" Width="*"/>
+                            <DataGridTextColumn Header="Full path" Binding="{Binding FullPath}" Width="*"><DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding FullPath}"/><Setter Property="TextTrimming" Value="CharacterEllipsis"/></Style></DataGridTextColumn.ElementStyle></DataGridTextColumn>
                             <DataGridTextColumn Header="Modified" Binding="{Binding LastWriteTime}" Width="130"/>
                         </DataGrid.Columns>
                     </DataGrid>
+                        <TextBlock x:Name="TxtEmptyHunter" Text="Choose a minimum size and click Scan Large Files. Files in Downloads, Videos and Documents are included. Installed apps, game libraries and virtual machines are never listed." Foreground="{StaticResource TextSecondary}" FontSize="13" TextWrapping="Wrap" TextAlignment="Center" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="460" IsHitTestVisible="False"/>
+                    </Grid>
 
                     <!-- Action buttons -->
                     <Grid Grid.Row="2" Margin="0,10,0,0">
@@ -2753,7 +3718,7 @@ $embeddedXaml = @'
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <TextBlock x:Name="TxtSelectedFileInfo" Grid.Column="0" Text="Select a large file to perform action." Foreground="#A1A1AA" FontSize="11" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="TxtSelectedFileInfo" Grid.Column="0" Text="Select a large file to perform action." Foreground="{StaticResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
                         <Button x:Name="BtnRevealInExplorer" Grid.Column="1" Content="Reveal in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,8,0"/>
                         <Button x:Name="BtnSendToTrash" Grid.Column="2" Content="Send to Recycle Bin" Margin="0,0,8,0"/>
                         <Button x:Name="BtnPermanentDelete" Grid.Column="3" Content="Permanent Delete" Style="{StaticResource DangerActionBtn}"/>
@@ -2761,45 +3726,71 @@ $embeddedXaml = @'
                 </Grid>
             </TabItem>
 
-            <!-- TAB 4: C: DRIVE DIRECTORY TREE EXPLORER -->
-            <TabItem Header="  C: Directory Explorer  ">
+            <!-- TAB 2: DETAILED FILE INSPECTOR (C: JUNK FILES) -->
+            <TabItem x:Name="TabInspector" Header="File Inspector">
                 <Grid Margin="12">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
+                    <!-- Selector Bar -->
                     <Grid Grid.Row="0" Margin="0,0,0,10">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="280"/>
+                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Column="0" Text="Junk Category: " Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <ComboBox x:Name="CmbInspectTarget" AutomationProperties.Name="Junk category" Grid.Column="1" Height="28" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnRefreshInspectFiles" Grid.Column="2" Content="Load Files" Margin="0,0,12,0"/>
+                        <TextBlock x:Name="TxtInspectSummary" Grid.Column="3" Text="Select a category and click Load Files to inspect individual files." Foreground="{StaticResource AccentTeal}" VerticalAlignment="Center" HorizontalAlignment="Right" FontWeight="SemiBold"/>
+                    </Grid>
+
+                    <!-- File Items Table -->
+                    <Grid Grid.Row="1">
+                    <DataGrid x:Name="GridInspectFiles" AutomationProperties.Name="Files in the selected category" AutoGenerateColumns="False">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="File Name" Binding="{Binding Name}" Width="250"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="RawBytes" SortDirection="Descending" Width="100" FontWeight="SemiBold" Foreground="{StaticResource AccentCyan}"/>
+                            <DataGridTextColumn Header="Full path" Binding="{Binding FullPath}" Width="*"><DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding FullPath}"/><Setter Property="TextTrimming" Value="CharacterEllipsis"/></Style></DataGridTextColumn.ElementStyle></DataGridTextColumn>
+                            <DataGridTextColumn Header="Last Modified" Binding="{Binding LastWriteTime}" Width="140"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                        <TextBlock x:Name="TxtEmptyInspector" Text="Pick a category above and click Load Files to list its biggest files." Foreground="{StaticResource TextSecondary}" FontSize="13" TextWrapping="Wrap" TextAlignment="Center" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="460" IsHitTestVisible="False"/>
+                    </Grid>
+
+                    <!-- Action Bar -->
+                    <Grid Grid.Row="2" Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <Button x:Name="BtnFolderUp" Grid.Column="0" Content="Up Folder" Margin="0,0,8,0"/>
-                        <TextBox x:Name="TxtCurrentPath" Grid.Column="1" Height="28" Background="#16161A" Foreground="#00B4D8" BorderBrush="#333338" Padding="8,4" IsReadOnly="True" VerticalContentAlignment="Center"/>
-                        <Button x:Name="BtnScanCurrentDir" Grid.Column="2" Content="Scan Folder" Style="{StaticResource PrimaryActionBtn}" Margin="8,0,8,0"/>
-                        <Button x:Name="BtnOpenCurrentInExplorer" Grid.Column="3" Content="Open in Explorer"/>
+                        <TextBlock x:Name="TxtSelectedInspectFileInfo" Grid.Column="0" Text="Select a file to inspect or delete." Foreground="{StaticResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
+                        <Button x:Name="BtnRevealInspectFileInExplorer" Grid.Column="1" Content="Reveal in File Explorer" Style="{StaticResource PrimaryActionBtn}" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnDeleteSingleInspectFile" Grid.Column="2" Content="Delete File" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnPurgeAllInspectFiles" Grid.Column="3" Content="Clear All Files in Target" Style="{StaticResource DangerActionBtn}"/>
                     </Grid>
-
-                    <DataGrid x:Name="GridDirectories" Grid.Row="1" AutoGenerateColumns="False">
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="Folder / File Name" Binding="{Binding Name}" Width="280"/>
-                            <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="60"/>
-                            <DataGridTextColumn Header="Size" Binding="{Binding DisplaySize}" SortMemberPath="RawSize" SortDirection="Descending" Width="100" FontWeight="SemiBold" Foreground="#00B4D8"/>
-                            <DataGridTextColumn Header="% Parent" Binding="{Binding PercentStr}" Width="90"/>
-                            <DataGridTextColumn Header="Items" Binding="{Binding ItemCount}" Width="85"/>
-                            <DataGridTextColumn Header="Last Modified" Binding="{Binding LastModified}" Width="*"/>
-                        </DataGrid.Columns>
-                    </DataGrid>
                 </Grid>
             </TabItem>
+
+
+
+
+
+
+
         </TabControl>
 
         <!-- Bottom Console / Output Terminal -->
         <GroupBox Grid.Row="2" Header="Activity &amp; Execution Log" Margin="0,10,0,0">
-            <TextBox x:Name="TxtConsoleLog" Background="{StaticResource ConsoleBg}" Foreground="#2EC4B6" FontFamily="Consolas, monospace" FontSize="11" BorderThickness="0" IsReadOnly="True" VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
+            <TextBox x:Name="TxtConsoleLog" AutomationProperties.Name="Activity log" Background="{StaticResource ConsoleBg}" Foreground="{StaticResource AccentTeal}" FontFamily="Consolas, monospace" FontSize="11" BorderThickness="0" IsReadOnly="True" VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"/>
         </GroupBox>
 
         <!-- Status Bar -->
@@ -2807,10 +3798,12 @@ $embeddedXaml = @'
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
-            <TextBlock x:Name="TxtGlobalStatus" Grid.Column="0" Text="Ready | Diskman - C: Drive Trash &amp; Storage Cleaner" FontSize="11" Foreground="#71717A"/>
-            <TextBlock Grid.Column="1" Text="Windows Storage Optimization Engine" FontSize="11" Foreground="#2EC4B6"/>
+            <TextBlock x:Name="TxtGlobalStatus" Grid.Column="0" Text="Ready" FontSize="11" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            <Button x:Name="BtnCancelAction" Grid.Column="1" Content="Cancel" Padding="10,2" FontSize="11" Margin="8,0,16,0" Visibility="Collapsed" ToolTip="Stop the running operation"/>
+            <TextBlock x:Name="TxtLogLocation" Grid.Column="2" VerticalAlignment="Center" Text="" FontSize="11" Foreground="{StaticResource TextSecondary}" ToolTip="Every action is written to this folder"/>
         </Grid>
     </Grid>
 </Window>
@@ -2827,7 +3820,17 @@ function Find-Control {
     return $window.FindName($Name)
 }
 
-# Live Console Logger Function (Streams to Terminal + GUI). Only ever called on the UI thread.
+# Audit trail: every log line is also appended to a daily file, so there is a record after the window closes
+$global:AuditLogDir = Join-Path ([System.Environment]::GetFolderPath('LocalApplicationData')) 'Diskman\logs'
+function Write-AuditLog {
+    param([string]$Line)
+    try {
+        if (-not (Test-Path -LiteralPath $global:AuditLogDir)) { New-Item -ItemType Directory -Path $global:AuditLogDir -Force | Out-Null }
+        Add-Content -LiteralPath (Join-Path $global:AuditLogDir ("diskman-{0:yyyyMMdd}.log" -f (Get-Date))) -Value $Line -Encoding UTF8
+    } catch {}
+}
+
+# Live log (terminal + in-app box + audit file). Only ever called on the UI thread.
 function Log-Console {
     param([string]$Message, [string]$Level = "INFO")
     $timestamp = (Get-Date).ToString("HH:mm:ss")
@@ -2849,14 +3852,22 @@ function Log-Console {
         $txtConsoleLog.AppendText("$timestamp $prefix $Message`r`n")
         $txtConsoleLog.ScrollToEnd()
     }
+    Write-AuditLog ("{0:yyyy-MM-dd HH:mm:ss} {1} {2}" -f (Get-Date), $prefix, $Message)
 }
 
 # Control References
 $txtConsoleLog             = Find-Control "TxtConsoleLog"
 $txtGlobalStat             = Find-Control "TxtGlobalStatus"
+$txtLogLocation            = Find-Control "TxtLogLocation"
+$btnCancelAction           = Find-Control "BtnCancelAction"
 $mainTabControl            = Find-Control "MainTabControl"
+$tabOverview               = Find-Control "TabOverview"
+$tabCleaner                = Find-Control "TabCleaner"
+$tabExplorer               = Find-Control "TabExplorer"
+$tabHunter                 = Find-Control "TabHunter"
+$tabInspector              = Find-Control "TabInspector"
 
-# C: Drive Metrics Strip Controls
+# Drive strip
 $txtCDriveTotal            = Find-Control "TxtCDriveTotal"
 $txtCDriveUsed             = Find-Control "TxtCDriveUsed"
 $txtCDriveFree             = Find-Control "TxtCDriveFree"
@@ -2864,10 +3875,39 @@ $progressCDrive            = Find-Control "ProgressCDrive"
 $txtCBarPercent            = Find-Control "TxtCBarPercent"
 $txtCBarStatus             = Find-Control "TxtCBarStatus"
 $txtCReclaimable           = Find-Control "TxtCReclaimable"
-$btnTopRefresh             = Find-Control "BtnTopRefresh"
+$btnRestartAdmin           = Find-Control "BtnRestartAdmin"
 $btnTopQuickScan           = Find-Control "BtnTopQuickScan"
 
-# Tab 1: C: Junk Cleaner Controls
+# Overview
+$txtOverviewVerdict        = Find-Control "TxtOverviewVerdict"
+$txtOverviewSub            = Find-Control "TxtOverviewSub"
+$panelScan                 = Find-Control "PanelScan"
+$txtScanProgress           = Find-Control "TxtScanProgress"
+$btnCancelScan             = Find-Control "BtnCancelScan"
+$barCategories             = Find-Control "BarCategories"
+$panelLegend               = Find-Control "PanelLegend"
+$gridTopFolders            = Find-Control "GridTopFolders"
+$txtEmptyTop               = Find-Control "TxtEmptyTop"
+$txtOverviewSelected       = Find-Control "TxtOverviewSelected"
+$btnOverviewOpen           = Find-Control "BtnOverviewOpen"
+$btnOverviewAction         = Find-Control "BtnOverviewAction"
+$btnFreeSafely             = Find-Control "BtnFreeSafely"
+$txtFreeSafelyNote         = Find-Control "TxtFreeSafelyNote"
+$txtAdminHint              = Find-Control "TxtAdminHint"
+$panelActions              = Find-Control "PanelActions"
+$panelSystemSpace          = Find-Control "PanelSystemSpace"
+
+# Space Explorer
+$btnSpaceUp                = Find-Control "BtnSpaceUp"
+$panelCrumbs               = Find-Control "PanelCrumbs"
+$gridSpace                 = Find-Control "GridSpace"
+$txtEmptyExplorer          = Find-Control "TxtEmptyExplorer"
+$txtSpaceSelected          = Find-Control "TxtSpaceSelected"
+$btnSpaceOpen              = Find-Control "BtnSpaceOpen"
+$btnSpaceCopy              = Find-Control "BtnSpaceCopy"
+$btnSpaceAction            = Find-Control "BtnSpaceAction"
+
+# Cleaner
 $btnSelectRec              = Find-Control "BtnSelectRecommended"
 $btnSelectAll              = Find-Control "BtnSelectAll"
 $btnClearSel               = Find-Control "BtnClearSelection"
@@ -2891,45 +3931,73 @@ $btnOpenCatInExplorer      = Find-Control "BtnOpenCategoryInExplorer"
 $btnInspectCatFiles        = Find-Control "BtnInspectCategoryFiles"
 $btnCleanSingleCategory    = Find-Control "BtnCleanSingleCategory"
 
-# Tab 2: File Inspector Controls
+# File Inspector
 $cmbInspectTarget          = Find-Control "CmbInspectTarget"
 $btnRefreshInspectFiles    = Find-Control "BtnRefreshInspectFiles"
 $txtInspectSummary         = Find-Control "TxtInspectSummary"
 $gridInspectFiles          = Find-Control "GridInspectFiles"
+$txtEmptyInspector         = Find-Control "TxtEmptyInspector"
 $txtSelectedInspectInfo    = Find-Control "TxtSelectedInspectFileInfo"
 $btnRevealInspectFile       = Find-Control "BtnRevealInspectFileInExplorer"
 $btnDeleteSingleInspectFile = Find-Control "BtnDeleteSingleInspectFile"
 $btnPurgeAllInspect         = Find-Control "BtnPurgeAllInspectFiles"
 
-# Tab 3: Hunter Controls
+# Large Files
 $cmbHuntSize               = Find-Control "CmbHunterSize"
 $cmbHuntCat                = Find-Control "CmbHunterCategory"
 $btnHuntScan               = Find-Control "BtnStartHunterScan"
 $gridLargeFiles            = Find-Control "GridLargeFiles"
+$txtEmptyHunter            = Find-Control "TxtEmptyHunter"
 $txtSelectedLargeFile      = Find-Control "TxtSelectedFileInfo"
 $btnRevealLargeFile        = Find-Control "BtnRevealInExplorer"
 $btnTrashLargeFile         = Find-Control "BtnSendToTrash"
 $btnPermDeleteLargeFile    = Find-Control "BtnPermanentDelete"
 
-# Tab 4: Directory Explorer Controls
-$btnFolderUp               = Find-Control "BtnFolderUp"
-$txtPath                   = Find-Control "TxtCurrentPath"
-$btnScanDir                = Find-Control "BtnScanCurrentDir"
-$btnOpenDirInExplorer      = Find-Control "BtnOpenCurrentInExplorer"
-$gridDir                   = Find-Control "GridDirectories"
-
 # Internal State
-$global:CurrentExplorerPath = "C:\"
-$global:ExplorerLoaded      = $false
 $global:ScannedCleanupItems = [System.Collections.ArrayList]@()
 $global:CurrentFilterGroup  = "All"
-$global:Job                 = $null
+$global:Jobs                = @{ action = $null; scan = $null }
+$global:SpaceTree           = $null
+$global:SpaceStack          = New-Object System.Collections.ArrayList
+$global:ScanPartial         = $false
+$global:TickCount           = 0
+$global:RescanPending       = $false
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $brushConverter = New-Object System.Windows.Media.BrushConverter
+$releaseUrl = 'https://raw.githubusercontent.com/Hackmaass/Diskman/main/release/diskman.ps1'
+$driveRoot = if ($env:SystemDrive) { "$($env:SystemDrive.TrimEnd('\'))\" } else { 'C:\' }
+$driveLetter = $driveRoot.Substring(0, 2)   # "C:" on most PCs; the Windows drive is not always C:
 
 # ---------------------------------------------------------------------------
-# Background work: scans and deletes run in their own runspace so the window never freezes.
+# Small UI helpers
+# ---------------------------------------------------------------------------
+
+# Every destructive confirmation defaults to No, so pressing Enter never deletes
+function Confirm-Action {
+    param([string]$Message, [string]$Title = 'Diskman', [string]$Icon = 'Warning')
+    $answer = [System.Windows.MessageBox]::Show($Message, $Title, [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::$Icon, [System.Windows.MessageBoxResult]::No)
+    return ($answer -eq [System.Windows.MessageBoxResult]::Yes)
+}
+
+function Show-Info {
+    param([string]$Message, [string]$Title = 'Diskman', [string]$Icon = 'Information')
+    [System.Windows.MessageBox]::Show($Message, $Title, [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::$Icon) | Out-Null
+}
+
+# Empty-state text is visible only while the grid has nothing to show
+function Set-Empty {
+    param($TextBlock, $Items)
+    $TextBlock.Visibility = if (@($Items).Count -eq 0) { 'Visible' } else { 'Collapsed' }
+}
+
+function Format-Count { param([long]$N) return $N.ToString('N0') }
+
+# ---------------------------------------------------------------------------
+# Background work: two slots share one runspace-per-job design.
+#   action: scans of cleanup targets, cleaning, hunting, commands (one at a time; disables action buttons)
+#   scan:   the whole-drive tree scan (read-only; can run while an action runs; cancellable)
 # The worker pushes log lines onto a queue; a DispatcherTimer on the UI thread drains it.
 # ---------------------------------------------------------------------------
 
@@ -2937,52 +4005,88 @@ $brushConverter = New-Object System.Windows.Media.BrushConverter
 $workerFunctions = @(
     'Format-Bytes', 'Test-IsSubpathOrEqual', 'Test-ReparsePoint', 'Test-WindowsServicingActive', 'Test-PathSafety',
     'Get-FolderSizeFast', 'Get-CleanableTargets', 'Scan-SmartCleanupItems', 'Get-CleanableCategoryFiles',
-    'Invoke-ExecuteCleanup', 'Invoke-ExecuteCategoryCleanup', 'Find-LargeFiles', 'Start-FolderScan'
+    'Invoke-ExecuteCleanup', 'Invoke-ExecuteCategoryCleanup', 'Find-LargeFiles', 'Scan-DriveTree',
+    'Get-AllowedCommands', 'Invoke-AllowedCommand', 'Invoke-VhdCompact', 'Get-CompactableDisks', 'New-DiskpartCompactScript', 'New-DiskpartDetachScript',
+    'Get-ScanParallelism', 'Find-TreeNode', 'Find-AppCaches', 'Test-AppCacheExcluded', 'Get-AppCacheKind', 'Get-AppCacheGroupKey', 'Get-SpaceCategory'
 )
 
-# Everything that must not be clicked while a job runs (one job at a time; no nested handlers)
-$busyControls = @(
-    $btnTopRefresh, $btnTopQuickScan, $btnSelectRec, $btnSelectAll, $btnClearSel, $btnScanClean, $btnRunCleanup,
-    $btnCleanSingleCategory, $btnRefreshInspectFiles, $btnDeleteSingleInspectFile, $btnPurgeAllInspect,
-    $btnHuntScan, $btnTrashLargeFile, $btnPermDeleteLargeFile, $btnScanDir, $btnFolderUp
+# Everything that must not be clicked while an action job runs
+$actionControls = @(
+    $btnSelectRec, $btnSelectAll, $btnClearSel, $btnScanClean, $btnRunCleanup, $btnCleanSingleCategory,
+    $btnRefreshInspectFiles, $btnDeleteSingleInspectFile, $btnPurgeAllInspect,
+    $btnHuntScan, $btnTrashLargeFile, $btnPermDeleteLargeFile, $btnFreeSafely
 )
 
-function Set-Busy {
-    param([bool]$Busy)
-    foreach ($c in $busyControls) { $c.IsEnabled = -not $Busy }
+function Update-BusyState {
+    $actionBusy = [bool]$global:Jobs.action
+    $scanBusy   = [bool]$global:Jobs.scan
+    foreach ($c in $actionControls) { $c.IsEnabled = -not $actionBusy }
+    $btnTopQuickScan.IsEnabled = -not ($scanBusy -or $actionBusy)
+    $btnCancelAction.Visibility = if ($actionBusy) { 'Visible' } else { 'Collapsed' }
+    $panelScan.Visibility = if ($scanBusy) { 'Visible' } else { 'Collapsed' }
+    Show-OverviewSelection
+    Show-SpaceSelection
+    if (-not $actionBusy) { Update-FreeSafely }
+}
+
+function Stop-BackgroundJob {
+    param([string]$Slot)
+    $job = $global:Jobs[$Slot]
+    if (-not $job) { return }
+    $job.Context['Cancelled'] = $true
+    if ($Slot -eq 'scan') {
+        # The walker checks this flag and returns the partial tree normally
+        [Diskman.TreeScan]::Cancel = $true
+    } else {
+        $null = $job.Ps.BeginStop($null, $null)
+    }
+    Log-Console "Cancelling: $($job.Status)..." "WARN"
 }
 
 $jobTimer = New-Object System.Windows.Threading.DispatcherTimer
 $jobTimer.Interval = [TimeSpan]::FromMilliseconds(200)
 $jobTimer.add_Tick({
-    $job = $global:Job
-    if (-not $job) { $jobTimer.Stop(); return }
+    $global:TickCount++
+    foreach ($slot in @('action', 'scan')) {
+        $job = $global:Jobs[$slot]
+        if (-not $job) { continue }
 
-    $msg = $null
-    while ($job.Queue.TryDequeue([ref]$msg)) { Log-Console $msg[0] $msg[1] }
-    $txtGlobalStat.Text = "$($job.Status)... $([int]((Get-Date) - $job.Started).TotalSeconds)s (window stays usable; actions are paused)"
+        $msg = $null
+        while ($job.Queue.TryDequeue([ref]$msg)) { Log-Console $msg[0] $msg[1] }
+        $elapsed = [int]((Get-Date) - $job.Started).TotalSeconds
+        if ($slot -eq 'action') {
+            $txtGlobalStat.Text = "$($job.Status)... $($elapsed)s"
+        } else {
+            Update-ScanProgress -Elapsed $elapsed
+        }
+        if (-not $job.Async.IsCompleted) { continue }
 
-    if (-not $job.Async.IsCompleted) { return }
+        $output = @()
+        $failure = $null
+        try { $output = @($job.Ps.EndInvoke($job.Async)) } catch { $failure = $_ }
+        $job.Ps.Dispose()
+        $job.Runspace.Dispose()
+        $global:Jobs[$slot] = $null
+        Update-BusyState
+        Update-CDriveMetricsDisplay -Quiet
 
-    $jobTimer.Stop()
-    $output = @()
-    $failure = $null
-    try { $output = @($job.Ps.EndInvoke($job.Async)) } catch { $failure = $_ }
-    $job.Ps.Dispose()
-    $job.Runspace.Dispose()
-    $global:Job = $null
-    Set-Busy $false
-    Update-CDriveMetricsDisplay -Quiet
-
-    if ($failure) {
-        Log-Console "$($job.Status) failed: $failure" "ERROR"
-    } else {
-        & $job.OnDone $output $job.Context
+        if ($failure) {
+            if ($job.Context['Cancelled']) {
+                Log-Console "$($job.Status) was cancelled." "WARN"
+                if ($job.Context['Ids']) { Start-ScanCJunk -Id $job.Context['Ids'] }
+            } else {
+                Log-Console "$($job.Status) failed: $failure" "ERROR"
+            }
+        } else {
+            & $job.OnDone $output $job.Context
+        }
     }
+    if (-not $global:Jobs.action -and -not $global:Jobs.scan) { $jobTimer.Stop() }
 })
 
 function Start-BackgroundJob {
     param(
+        [ValidateSet('action', 'scan')][string]$Slot = 'action',
         [string]$Status,
         [scriptblock]$Work,
         [hashtable]$Vars = @{},
@@ -2990,7 +4094,7 @@ function Start-BackgroundJob {
         [scriptblock]$OnDone
     )
 
-    if ($global:Job) {
+    if ($global:Jobs[$Slot]) {
         Log-Console "Another operation is still running; wait for it to finish." "WARN"
         return
     }
@@ -3012,16 +4116,24 @@ function Start-BackgroundJob {
     # Pass the text, not the scriptblock: a scriptblock stays bound to this (UI) runspace and fails on the worker
     $null = $ps.AddScript($Work.ToString())
 
-    $global:Job = @{
+    $global:Jobs[$Slot] = @{
         Status = $Status; Ps = $ps; Runspace = $rs; Queue = $queue; OnDone = $OnDone; Context = $Context
         Started = Get-Date; Async = $ps.BeginInvoke()
     }
-    Set-Busy $true
+    Update-BusyState
     Log-Console "$Status..."
     $jobTimer.Start()
 }
 
-# Function: Update C: Drive Metrics Display
+# ---------------------------------------------------------------------------
+# Drive strip and Overview
+# ---------------------------------------------------------------------------
+
+function Get-DriveState {
+    $d = [System.IO.DriveInfo]::new($driveRoot)
+    return [PSCustomObject]@{ Total = [long]$d.TotalSize; Free = [long]$d.AvailableFreeSpace; Used = [long]($d.TotalSize - $d.AvailableFreeSpace) }
+}
+
 function Update-CDriveMetricsDisplay {
     param([switch]$Quiet)
     $cMetrics = Get-CDriveMetrics
@@ -3031,31 +4143,553 @@ function Update-CDriveMetricsDisplay {
         $txtCDriveFree.Text  = "$($cMetrics.FreeGB) GB"
         $progressCDrive.Value = $cMetrics.UsedPercent
         $txtCBarPercent.Text = "$($cMetrics.UsedPercent)% used - $($cMetrics.StatusText)"
-        $txtCBarStatus.Text  = "Drive C: [$($cMetrics.VolumeLabel)] ($($cMetrics.FileSystem))"
-
-        $txtGlobalStat.Text  = "C: Drive Status: $($cMetrics.FreeGB) GB Free of $($cMetrics.TotalGB) GB ($($cMetrics.StatusText))"
+        $txtCBarStatus.Text  = "Drive $driveLetter [$($cMetrics.VolumeLabel)] ($($cMetrics.FileSystem))"
+        if (-not $global:Jobs.action) { $txtGlobalStat.Text = "$driveLetter $($cMetrics.FreeGB) GB free of $($cMetrics.TotalGB) GB ($($cMetrics.StatusText))" }
         if (-not $Quiet) {
-            Log-Console "C: Drive Status: $($cMetrics.UsedGB) GB used / $($cMetrics.TotalGB) GB total ($($cMetrics.FreeGB) GB free)"
+            Log-Console "$driveLetter drive status: $($cMetrics.UsedGB) GB used / $($cMetrics.TotalGB) GB total ($($cMetrics.FreeGB) GB free)"
         }
+    }
+    Update-OverviewVerdict
+}
+
+# Safe-tier categories the user can clean right now (the one-click win)
+function Get-SafeCleanItems {
+    return @($global:ScannedCleanupItems | Where-Object { $_.SafetyLevel -eq 'Safe' -and $_.Recommended -and $_.RawBytes -gt 0 -and $_.CanSelect -and $_.Type -ne 'RecycleBin' })
+}
+
+function Update-OverviewVerdict {
+    $drive = Get-DriveState
+    $pct = if ($drive.Total -gt 0) { 100.0 * $drive.Free / $drive.Total } else { 100 }
+    $level = if ($drive.Free -lt 2GB -or $pct -lt 5) { 'Critically low' } elseif ($pct -lt 10) { 'Low' } else { 'Healthy' }
+    $color = switch ($level) { 'Critically low' { '#FF6B6B' } 'Low' { '#FFB703' } default { '#2EC4B6' } }
+    $safe = Get-SafeCleanItems
+    $safeBytes = [long](($safe | Measure-Object -Property RawBytes -Sum).Sum)
+
+    $text = "$(Format-Bytes $drive.Free) free of $(Format-Bytes $drive.Total). $level."
+    if ($safeBytes -gt 50MB) { $text += " About $(Format-Bytes $safeBytes) can be freed safely right now." }
+    elseif ($global:ScannedCleanupItems.Count -gt 0 -and $level -eq 'Healthy') { $text += " Nothing large to clean." }
+    $txtOverviewVerdict.Text = $text
+    $txtOverviewVerdict.Foreground = $brushConverter.ConvertFromString($color)
+
+    if ($global:Jobs.scan) {
+        $txtOverviewSub.Text = "Scanning the whole drive to show where the rest went. Results appear as they are found."
+    } elseif ($global:SpaceTree) {
+        $scanned = [long]$global:SpaceTree.Bytes
+        $share = if ($drive.Used -gt 0) { [math]::Min(100, [math]::Round(100.0 * $scanned / $drive.Used)) } else { 100 }
+        $gap = $drive.Used - $scanned
+        if ($global:ScanPartial) {
+            $txtOverviewSub.Text = "Partial result: the scan was cancelled, so these numbers are incomplete. Click Rescan for the full picture."
+        } elseif ($gap -gt 0) {
+            $txtOverviewSub.Text = if ($isAdmin) { "Accounted for $share% of used space. $(Format-Bytes $gap) could not be read (in use by Windows or protected)." }
+                                   else { "Accounted for $share% of used space. $(Format-Bytes $gap) sits in protected areas (such as shadow copies). Restart as Administrator to break it down." }
+        } else {
+            $txtOverviewSub.Text = "Accounted for all of the used space. Some Windows files are shared, so folder sizes can add up to slightly more than the drive reports."
+        }
+    } else {
+        $txtOverviewSub.Text = ''
+    }
+    $txtOverviewSub.ToolTip = $txtOverviewSub.Text
+    Update-AdminHint
+}
+
+# What administrator rights would unlock, so the Restart button has a reason attached
+function Update-AdminHint {
+    if ($isAdmin) { $txtAdminHint.Visibility = 'Collapsed'; return }
+    $locked = [long](($global:ScannedCleanupItems | Where-Object { $_.RequiresAdmin -and $_.Type -ne 'RecycleBin' } | Measure-Object -Property RawBytes -Sum).Sum)
+    $gap = if ($global:SpaceTree -and -not $global:ScanPartial) { [math]::Max([long]0, (Get-DriveState).Used - [long]$global:SpaceTree.Bytes) } else { [long]0 }
+    if ($locked -lt 50MB -and $gap -lt 500MB) { $txtAdminHint.Visibility = 'Collapsed'; return }
+    $parts = @()
+    if ($locked -ge 50MB) { $parts += "about $(Format-Bytes $locked) of system caches that are skipped now" }
+    if ($gap -ge 500MB) { $parts += "a look inside $(Format-Bytes $gap) of protected space (shadow copies, system files)" }
+    $txtAdminHint.Text = "As administrator you would also unlock " + ($parts -join ' and ') + ". Use Restart as Administrator."
+    $txtAdminHint.Visibility = 'Visible'
+}
+
+# One-click win: Safe-tier categories only, one confirmation
+function Update-FreeSafely {
+    $safe = Get-SafeCleanItems
+    $bytes = [long](($safe | Measure-Object -Property RawBytes -Sum).Sum)
+    if ($safe.Count -gt 0 -and $bytes -gt 50MB) {
+        $btnFreeSafely.Content = "Free $(Format-Bytes $bytes) safely"
+        $btnFreeSafely.IsEnabled = -not $global:Jobs.action
+        $txtFreeSafelyNote.Text = "Cleans only Safe categories: " + (($safe | Select-Object -First 4 | ForEach-Object { $_.CategoryName }) -join ', ') + $(if ($safe.Count -gt 4) { " and $($safe.Count - 4) more" } else { '' }) + ". You confirm first."
+    } else {
+        $btnFreeSafely.Content = "Nothing safe to free right now"
+        $btnFreeSafely.IsEnabled = $false
+        $txtFreeSafelyNote.Text = if ($global:ScannedCleanupItems.Count -eq 0) { "Waiting for the cleanup scan..." } else { "The Safe categories are already small. See the recommended actions below for bigger items." }
     }
 }
 
-# Function: Recalculate Selected Total Badge
+$categoryColors = [ordered]@{
+    'Apps and games' = '#00B4D8'; 'Developer tools' = '#8B7CF6'; 'Windows and system' = '#6B7B8C'
+    'Your files' = '#2EC4B6'; 'Caches and temp' = '#FFB703'; 'Other' = '#A1A1AA'; 'Protected or unreadable' = '#52525B'
+}
+
+function Show-CategoryBar {
+    param($Cats, [long]$GapBytes)
+    $cats = $Cats
+    $segments = New-Object System.Collections.ArrayList
+    foreach ($name in $categoryColors.Keys) {
+        $bytes = if ($name -eq 'Protected or unreadable') { [math]::Max([long]0, $GapBytes) } else { [long]$cats[$name] }
+        if ($bytes -gt 0) { [void]$segments.Add([PSCustomObject]@{ Name = $name; Bytes = $bytes; Color = $categoryColors[$name] }) }
+    }
+    $total = [long](($segments | Measure-Object -Property Bytes -Sum).Sum)
+    $barCategories.Children.Clear(); $barCategories.ColumnDefinitions.Clear(); $panelLegend.Children.Clear()
+    $i = 0
+    foreach ($seg in $segments) {
+        $col = New-Object System.Windows.Controls.ColumnDefinition
+        $col.Width = New-Object System.Windows.GridLength ([double]$seg.Bytes), ([System.Windows.GridUnitType]::Star)
+        $barCategories.ColumnDefinitions.Add($col)
+        $pct = [math]::Round(100.0 * $seg.Bytes / [math]::Max([long]1, $total), 1)
+        $b = New-Object System.Windows.Controls.Border
+        $b.Background = $brushConverter.ConvertFromString($seg.Color)
+        $b.ToolTip = "$($seg.Name): $(Format-Bytes $seg.Bytes) ($pct%)"
+        $b.BorderThickness = New-Object System.Windows.Thickness 0, 0, 1, 0
+        $b.BorderBrush = $brushConverter.ConvertFromString('#16161A')
+        [System.Windows.Controls.Grid]::SetColumn($b, $i)
+        [void]$barCategories.Children.Add($b)
+
+        $item = New-Object System.Windows.Controls.StackPanel
+        $item.Orientation = 'Horizontal'; $item.Margin = New-Object System.Windows.Thickness 0, 0, 12, 2
+        $sw = New-Object System.Windows.Shapes.Rectangle
+        $sw.Width = 10; $sw.Height = 10; $sw.RadiusX = 2; $sw.RadiusY = 2; $sw.VerticalAlignment = 'Center'
+        $sw.Fill = $brushConverter.ConvertFromString($seg.Color); $sw.Margin = New-Object System.Windows.Thickness 0, 0, 6, 0
+        $lbl = New-Object System.Windows.Controls.TextBlock
+        $lbl.Text = "$($seg.Name)  $(Format-Bytes $seg.Bytes) ($pct%)"; $lbl.FontSize = 10.5
+        $lbl.Foreground = $brushConverter.ConvertFromString('#D4D4D8')
+        [void]$item.Children.Add($sw); [void]$item.Children.Add($lbl); [void]$panelLegend.Children.Add($item)
+        $i++
+    }
+}
+
+function Get-InsightText {
+    param($Rule)
+    if (-not $Rule) { return 'Review in Explorer' }
+    switch ($Rule.Verdict) {
+        'Clean'     { return "Clean ($($Rule.Safety))" }
+        'Command'   { return (Get-AllowedCommands)[$Rule.CommandId].Short }
+        'Uninstall' { return 'Uninstall in Settings' }
+        'System'    { return 'Windows-managed' }
+        default     { return 'Review' }
+    }
+}
+
+function New-SpaceRow {
+    param($Node, [long]$ParentBytes, [string]$Name = $null, [string]$Display = $null)
+    $rule = if ($Node) { Find-SpaceRule -Path $Node.Path } else { $null }
+    if (-not $rule -and $Node) { $rule = Get-GenericAdvice -Path $Node.Path }
+    $pct = if ($ParentBytes -gt 0) { 100.0 * $Node.Bytes / $ParentBytes } else { 0 }
+    $modified = if ($Node.ModifiedTicks -gt 0) { ([datetime]::new($Node.ModifiedTicks, [System.DateTimeKind]::Utc)).ToLocalTime().ToString('yyyy-MM-dd') } else { '' }
+    $profilePath = [System.Environment]::GetFolderPath('UserProfile')
+    $shown = if ($Display) { $Display } elseif ($Node.Path.StartsWith($profilePath, [System.StringComparison]::OrdinalIgnoreCase)) { '~' + $Node.Path.Substring($profilePath.Length) } else { $Node.Path }
+    return [PSCustomObject]@{
+        Name = if ($Name) { $Name } else { $Node.Name }; Display = $shown; Path = $Node.Path
+        Bytes = [long]$Node.Bytes; DisplaySize = Format-Bytes $Node.Bytes
+        PctValue = [math]::Round($pct, 1); PctText = $(if ($pct -ge 0.1) { "$([math]::Round($pct, 1))%" } else { '<0.1%' })
+        Files = [long]$Node.Files; FilesText = Format-Count $Node.Files; Modified = $modified
+        Insight = Get-InsightText $rule; Rule = $rule; Node = $Node
+    }
+}
+
+# While the scan runs: top-level folders appear as soon as each finishes
+function Show-PartialRows {
+    $drive = Get-DriveState
+    $rows = @([Diskman.TreeScan]::Partial.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 12 | ForEach-Object {
+        $b = [long]$_.Value
+        [PSCustomObject]@{ Name = $_.Key; Display = $_.Key; Path = $_.Key; Bytes = $b; DisplaySize = Format-Bytes $b
+            PctValue = 0; PctText = "$([math]::Round(100.0 * $b / [math]::Max([long]1, $drive.Used), 1))%"; Insight = 'scanning...'; Rule = $null; Node = $null }
+    })
+    $gridTopFolders.ItemsSource = $rows
+    Set-Empty $txtEmptyTop $rows
+}
+
+function Update-ScanProgress {
+    param([int]$Elapsed)
+    $files = [Diskman.TreeScan]::ScannedFiles
+    $bytes = [Diskman.TreeScan]::ScannedBytes
+    $cur = [Diskman.TreeScan]::Current
+    $txtScanProgress.Text = "Scanning $driveLetter   $(Format-Count $files) files   |   $(Format-Bytes $bytes)   |   now in $cur   |   $([TimeSpan]::FromSeconds($Elapsed).ToString('m\:ss'))"
+    if (($global:TickCount % 5) -eq 0) { Show-PartialRows }
+}
+
+# App caches found by structure join the Cleaner list and the rules (so the Overview and Explorer advise on them)
+function Merge-DetectedCaches {
+    param($Items)
+    $kept = @($global:ScannedCleanupItems | Where-Object { -not $_.Dynamic })
+    $all = @($kept + @($Items)) | Sort-Object -Property @{ Expression = { $_.RawBytes }; Descending = $true }, @{ Expression = { $_.CategoryName }; Descending = $false }
+    Set-ScanResults -Items $all -Quiet
+}
+
+# The scan worker already did the heavy work (tree, detected caches, category totals): this only renders them
+function Show-ScanResults {
+    param($Bundle, [bool]$Partial)
+    $prepared = [System.Diagnostics.Stopwatch]::StartNew()
+    $Tree = $Bundle.Tree
+    $global:SpaceTree = $Tree
+    $global:ScanPartial = $Partial
+    $detected = @($Bundle.Detected)
+    Set-DetectedCacheItems -Items $detected
+    Merge-DetectedCaches -Items $detected
+    if ($detected.Count -gt 0) {
+        Log-Console "Detected $($detected.Count) apps with cache folders: $(Format-Bytes ([long](($detected | Measure-Object -Property RawBytes -Sum).Sum))) in total." "SUCCESS"
+    }
+    $drive = Get-DriveState
+    $rows = Get-SpaceAccounting -Root $Tree -UsedBytes $drive.Used -Elevated $isAdmin
+    $gap = [long](($rows | Where-Object { $_.Kind -in 'Protected', 'Unreadable' } | Measure-Object -Property Bytes -Sum).Sum)
+
+    Show-CategoryBar -Cats $Bundle.Categories -GapBytes $gap
+
+    $top = @(Get-BiggestFolders -Root $Tree -Max 12 | ForEach-Object { New-SpaceRow -Node $_ -ParentBytes $drive.Used })
+    $gridTopFolders.ItemsSource = $top
+    Set-Empty $txtEmptyTop $top
+    if ($top.Count -eq 0) { $txtEmptyTop.Text = 'No folder over 100 MB was found.' }
+
+    Show-SystemSpace
+    Set-SpaceNode -Node $Tree -Reset
+    Update-ActionCards
+    Update-OverviewVerdict
+    $covered = @($top | Where-Object { $_.Rule -and -not $_.Rule.Generic }).Count
+    $general = @($top | Where-Object { $_.Rule -and $_.Rule.Generic }).Count
+    Log-Console "Drive scan complete: $(Format-Bytes $Tree.Bytes) in $(Format-Count $Tree.Files) files, $($rows.Count) accounting rows, $covered of $($top.Count) biggest folders have specific advice and $general general guidance (results prepared in $($prepared.ElapsedMilliseconds) ms)." "SUCCESS"
+}
+
+function Show-SystemSpace {
+    $panelSystemSpace.Children.Clear()
+    foreach ($r in (Get-SystemSpace -Root $global:SpaceTree -Elevated $isAdmin)) {
+        $card = New-Object System.Windows.Controls.StackPanel
+        $card.Margin = New-Object System.Windows.Thickness 0, 0, 0, 10
+        $head = New-Object System.Windows.Controls.DockPanel
+        $size = New-Object System.Windows.Controls.TextBlock
+        $size.Text = if ($null -ne $r.Bytes) { Format-Bytes $r.Bytes } elseif ($r.NeedsAdmin -and -not $isAdmin) { 'needs administrator' } else { 'not measured' }
+        $size.FontWeight = 'Bold'; $size.Foreground = $brushConverter.ConvertFromString('#00B4D8'); $size.FontSize = 12
+        [System.Windows.Controls.DockPanel]::SetDock($size, 'Right')
+        $name = New-Object System.Windows.Controls.TextBlock
+        $name.Text = $r.Name; $name.FontWeight = 'SemiBold'; $name.FontSize = 12; $name.TextTrimming = 'CharacterEllipsis'
+        $name.Foreground = $brushConverter.ConvertFromString('#EDEDED')
+        [void]$head.Children.Add($size); [void]$head.Children.Add($name)
+        $note = New-Object System.Windows.Controls.TextBlock
+        $note.Text = $r.Note; $note.TextWrapping = 'Wrap'; $note.FontSize = 11; $note.Foreground = $brushConverter.ConvertFromString('#A1A1AA')
+        [void]$card.Children.Add($head); [void]$card.Children.Add($note)
+        if ($r.CommandId -and ($null -ne $r.Bytes -or $r.NeedsAdmin)) {
+            $cmd = (Get-AllowedCommands)[$r.CommandId]
+            $btn = New-Object System.Windows.Controls.Button
+            $btn.Content = if ($cmd.RequiresAdmin -and -not $isAdmin) { 'Restart as Administrator to run' } else { $cmd.Title }
+            $btn.FontSize = 11; $btn.Padding = New-Object System.Windows.Thickness 10, 4, 10, 4; $btn.Margin = New-Object System.Windows.Thickness 0, 6, 0, 0
+            $btn.HorizontalAlignment = 'Left'; $btn.Tag = $r.CommandId
+            $btn.add_Click({ param($s, $e) Invoke-CommandAction -Id $s.Tag })
+            [void]$card.Children.Add($btn)
+        }
+        if ($r.Uri) {
+            $open = New-Object System.Windows.Controls.Button
+            $open.Content = 'Open Settings'; $open.FontSize = 11; $open.Padding = New-Object System.Windows.Thickness 10, 4, 10, 4
+            $open.Margin = New-Object System.Windows.Thickness 0, 6, 0, 0; $open.HorizontalAlignment = 'Left'; $open.Tag = $r.Uri
+            $open.add_Click({ param($s, $e) Start-Process $s.Tag })
+            [void]$card.Children.Add($open)
+        }
+        [void]$panelSystemSpace.Children.Add($card)
+    }
+}
+
+# Recommended actions: biggest safe wins first, then commands and uninstalls
+function Update-ActionCards {
+    $panelActions.Children.Clear()
+    $cands = New-Object System.Collections.ArrayList
+
+    foreach ($item in ($global:ScannedCleanupItems | Where-Object { $_.RawBytes -ge 100MB -and $_.Type -ne 'RecycleBin' })) {
+        $order = switch ($item.SafetyLevel) { 'Safe' { 0 } 'Optional' { 1 } default { 3 } }
+        [void]$cands.Add([PSCustomObject]@{ Order = $order; Bytes = [long]$item.RawBytes; Title = $item.CategoryName; Safety = $item.SafetyLevel; Why = $item.Description
+            Label = $(if ($item.CanSelect) { 'Clean...' } else { 'Needs administrator' }); Kind = 'Clean'; Item = $item; Rule = $null; Path = $item.Target })
+    }
+    if ($global:SpaceTree) {
+        foreach ($node in (Get-BiggestFolders -Root $global:SpaceTree -Max 20 -MinBytes 500MB)) {
+            $rule = Find-SpaceRule -Path $node.Path
+            if ($rule -and $rule.Verdict -in 'Command', 'Uninstall') {
+                $label = if ($rule.Verdict -eq 'Command') { (Get-AllowedCommands)[$rule.CommandId].Short } else { 'Open Settings' }
+                if ($rule.CommandId -eq 'DockerPrune' -and -not (Test-DockerEngineRunning)) { $label = 'Start Docker to prune' }
+                if ($rule.RequiresAdmin -and -not $isAdmin) { $label = 'Needs administrator' }
+                [void]$cands.Add([PSCustomObject]@{ Order = $(if ($rule.Verdict -eq 'Command') { 2 } else { 4 }); Bytes = [long]$node.Bytes; Title = $rule.Title; Safety = $rule.Safety
+                    Why = $(if ($rule.Effect) { "$($rule.What)`nEffect: $($rule.Effect)" } else { $rule.What }); Label = $label; Kind = $rule.Verdict; Item = $null; Rule = $rule; Path = $node.Path })
+            }
+        }
+    }
+
+    # Docker / WSL virtual disks that can give space back (found by registration, never by searching for .vhdx)
+    foreach ($disk in (Get-CompactableDisks | Where-Object { $_.Bytes -ge 500MB })) {
+        $drule = Find-SpaceRule -Path (Split-Path -Path $disk.Path -Parent)
+        if ($drule) {
+            [void]$cands.Add([PSCustomObject]@{ Order = 2; Bytes = [long]$disk.Bytes; Title = "Compact: $($disk.Name)"; Safety = 'Advanced'
+                Why = "$($drule.What)`nEffect: $($drule.Effect)"; Label = $(if ($isAdmin) { 'Compact...' } else { 'Needs administrator' }); Kind = 'Command'; Item = $null; Rule = $drule; Path = $disk.Path })
+        }
+    }
+
+    # Safe cleans first, but the biggest commands/uninstalls always get a place: they are often the largest lever
+    $ranked = @($cands | Sort-Object -Property @{ Expression = { $_.Order } }, @{ Expression = { $_.Bytes }; Descending = $true })
+    $lead = @($ranked | Select-Object -First 5)
+    $bigActions = @($ranked | Where-Object { $_.Kind -ne 'Clean' -and $_ -notin $lead } | Sort-Object -Property Bytes -Descending | Select-Object -First 3)
+    $top = @($lead + $bigActions)
+    if ($top.Count -eq 0) {
+        $t = New-Object System.Windows.Controls.TextBlock
+        $t.Text = if ($global:Jobs.scan -or $global:Jobs.action) { 'Recommendations appear when the scans finish.' } else { 'Nothing large to act on.' }
+        $t.Foreground = $brushConverter.ConvertFromString('#A1A1AA'); $t.FontSize = 12; $t.TextWrapping = 'Wrap'
+        [void]$panelActions.Children.Add($t)
+        return
+    }
+    foreach ($c in $top) {
+        $card = New-Object System.Windows.Controls.Border
+        $card.Background = $brushConverter.ConvertFromString('#1B1B1F'); $card.BorderBrush = $brushConverter.ConvertFromString('#333338')
+        $card.BorderThickness = New-Object System.Windows.Thickness 1; $card.CornerRadius = New-Object System.Windows.CornerRadius 6
+        $card.Padding = New-Object System.Windows.Thickness 10, 8, 10, 8; $card.Margin = New-Object System.Windows.Thickness 0, 0, 0, 8
+        $stack = New-Object System.Windows.Controls.StackPanel
+        $head = New-Object System.Windows.Controls.DockPanel
+        $size = New-Object System.Windows.Controls.TextBlock
+        $size.Text = if ($c.Kind -eq 'Clean') { Format-Bytes $c.Bytes } elseif ($c.Rule -and $c.Rule.CommandId -eq 'CompactDisk') { "File: $(Format-Bytes $c.Bytes)" } else { "Folder: $(Format-Bytes $c.Bytes)" }
+        $size.FontWeight = 'Bold'; $size.Foreground = $brushConverter.ConvertFromString('#00B4D8')
+        [System.Windows.Controls.DockPanel]::SetDock($size, 'Right')
+        $title = New-Object System.Windows.Controls.TextBlock
+        $title.Text = $c.Title; $title.FontWeight = 'SemiBold'; $title.TextTrimming = 'CharacterEllipsis'; $title.Foreground = $brushConverter.ConvertFromString('#EDEDED')
+        [void]$head.Children.Add($size); [void]$head.Children.Add($title)
+        $why = New-Object System.Windows.Controls.TextBlock
+        $why.Text = $c.Why; $why.TextWrapping = 'Wrap'; $why.FontSize = 11; $why.MaxHeight = 62; $why.TextTrimming = 'CharacterEllipsis'
+        $why.Foreground = $brushConverter.ConvertFromString('#A1A1AA'); $why.Margin = New-Object System.Windows.Thickness 0, 3, 0, 6
+        $why.ToolTip = $c.Why
+        $foot = New-Object System.Windows.Controls.DockPanel
+        $badge = New-Object System.Windows.Controls.TextBlock
+        $badge.Text = $c.Safety.ToUpper(); $badge.FontSize = 10; $badge.FontWeight = 'Bold'; $badge.VerticalAlignment = 'Center'
+        $badge.Foreground = $brushConverter.ConvertFromString($(switch ($c.Safety) { 'Safe' { '#2EC4B6' } 'Optional' { '#FFB703' } 'Advanced' { '#FF8A80' } default { '#A1A1AA' } }))
+        $btn = New-Object System.Windows.Controls.Button
+        $btn.Content = $c.Label; $btn.FontSize = 11; $btn.Padding = New-Object System.Windows.Thickness 10, 4, 10, 4; $btn.Tag = $c
+        [System.Windows.Controls.DockPanel]::SetDock($btn, 'Right')
+        $btn.add_Click({ param($s, $e) Invoke-ActionCard $s.Tag })
+        [void]$foot.Children.Add($btn); [void]$foot.Children.Add($badge)
+        [void]$stack.Children.Add($head); [void]$stack.Children.Add($why); [void]$stack.Children.Add($foot)
+        $card.Child = $stack
+        [void]$panelActions.Children.Add($card)
+    }
+}
+
+function Invoke-ActionCard {
+    param($Card)
+    if ($Card.Label -eq 'Needs administrator') { Restart-AsAdministrator; return }
+    switch ($Card.Kind) {
+        'Clean'     { Start-CleanCategory -Item $Card.Item }
+        'Command'   { Invoke-CommandAction -Id $Card.Rule.CommandId -Param $Card.Rule.Param }
+        'Uninstall' { Open-Settings -Rule $Card.Rule }
+    }
+}
+
+function Open-Settings {
+    param($Rule)
+    $uri = if ($Rule.Uri) { $Rule.Uri } else { 'ms-settings:appsfeatures' }
+    Start-Process $uri
+    Log-Console "Opened Windows Settings for $($Rule.Title)." "SUCCESS"
+}
+
+# ---------------------------------------------------------------------------
+# Admin: restart elevated, and run allow-listed commands
+# ---------------------------------------------------------------------------
+
+function Restart-AsAdministrator {
+    if ($global:Jobs.action -or $global:Jobs.scan) {
+        Show-Info "Wait for the running operation to finish (or cancel it), then restart as administrator."
+        return
+    }
+    try {
+        if ($PSCommandPath) {
+            Start-Process powershell.exe -Verb RunAs -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+        } else {
+            # Started from the web: there is no local file to relaunch, so the current release is fetched again
+            if (-not (Confirm-Action "Diskman was started from the web, so there is no local file to relaunch.`n`nIt will download and run the current release from GitHub again, as administrator:`n$releaseUrl`n`nContinue?" 'Restart as Administrator' 'Question')) { return }
+            Start-Process powershell.exe -Verb RunAs -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', "irm '$releaseUrl' | iex")
+        }
+        Log-Console "Restarting as administrator..." "WARN"
+        $window.Close()
+    } catch {
+        Log-Console "Administrator restart was cancelled or failed: $($_.Exception.Message)" "WARN"
+    }
+}
+
+function Invoke-CommandAction {
+    param([string]$Id, [string]$Param = $null)
+    $cmd = (Get-AllowedCommands)[$Id]
+    if (-not $cmd) { return }
+    if ($Id -eq 'DockerPrune' -and -not (Test-DockerEngineRunning)) {
+        Show-Info "Docker Desktop is not running, so there is nothing to prune yet.`n`nStart Docker Desktop, wait until its engine is running, then try again. To shrink the disk file itself, quit Docker Desktop and use Compact instead."
+        return
+    }
+    if ($cmd.RequiresAdmin -and -not $isAdmin) { Restart-AsAdministrator; return }
+    $detail = if ($Param) { "`n`nDisk: $Param" } else { '' }
+    if (-not (Confirm-Action "$($cmd.Consent)$detail`n`nRun it now?" $cmd.Title 'Warning')) { return }
+    Log-Console "Command approved by user: $($cmd.Title) ($($cmd.Exe) $($cmd.Args -join ' '))$(if ($Param) { " on $Param" })" "WARN"
+    Start-BackgroundJob -Status $cmd.Title `
+        -Vars @{ CmdId = $Id; CmdPath = $Param } `
+        -Context @{ FreeBefore = (Get-DriveState).Free } `
+        -Work { Invoke-AllowedCommand -Id $CmdId -Path $CmdPath -OnLine { param($t) $LogQueue.Enqueue(@($t, 'INFO')) } } `
+        -OnDone {
+            param($out, $ctx)
+            $code = @($out) | Where-Object { $_ -is [int] } | Select-Object -Last 1
+            Log-Console "Command finished (exit code $code). $driveLetter free space went from $(Format-Bytes $ctx.FreeBefore) to $(Format-Bytes (Get-DriveState).Free). Rescanning to show the new sizes." $(if ($code -eq 0) { 'SUCCESS' } else { 'WARN' })
+            Start-SpaceScan
+        }
+}
+
+# ---------------------------------------------------------------------------
+# Selected-row action bar, shared by Overview and Space Explorer
+# ---------------------------------------------------------------------------
+
+function Set-ActionBar {
+    param($Row, $Text, $OpenBtn, $ActionBtn, $CopyBtn = $null)
+    $busy = [bool]$global:Jobs.action
+    if (-not $Row) {
+        $OpenBtn.IsEnabled = $false; $ActionBtn.IsEnabled = $false; $ActionBtn.Content = 'Action'
+        if ($CopyBtn) { $CopyBtn.IsEnabled = $false }
+        return
+    }
+    $rule = $Row.Rule
+    $hasPath = [bool]$Row.Path -and (Test-Path -LiteralPath $Row.Path)
+    $OpenBtn.IsEnabled = $hasPath
+    if ($CopyBtn) { $CopyBtn.IsEnabled = [bool]$Row.Path }
+    $what = if ($rule) { "$($rule.Title): $($rule.What)" } else { 'Not recognised. Open it in Explorer to decide; Diskman only offers deletion for folders it knows are safe.' }
+    $Text.Text = "$($Row.Path)  -  $($Row.DisplaySize)`n$what"
+    $Text.ToolTip = $Text.Text
+    $label = 'Review only'; $enabled = $false
+    if ($rule) {
+        switch ($rule.Verdict) {
+            'Clean'     { $label = 'Clean...'; $enabled = $true }
+            'Command'   {
+                $label = (Get-AllowedCommands)[$rule.CommandId].Short; $enabled = $true
+                if ($rule.CommandId -eq 'DockerPrune' -and -not (Test-DockerEngineRunning)) { $label = 'Start Docker to prune' }
+            }
+            'Uninstall' { $label = 'Open Settings'; $enabled = $true }
+            'System'    { $label = 'Windows-managed' }
+        }
+        if ($enabled -and $rule.RequiresAdmin -and -not $isAdmin) { $label = 'Needs administrator' }
+    }
+    $ActionBtn.Content = $label
+    $ActionBtn.IsEnabled = $enabled -and -not $busy
+}
+
+function Show-OverviewSelection { Set-ActionBar -Row $gridTopFolders.SelectedItem -Text $txtOverviewSelected -OpenBtn $btnOverviewOpen -ActionBtn $btnOverviewAction }
+function Show-SpaceSelection { Set-ActionBar -Row $gridSpace.SelectedItem -Text $txtSpaceSelected -OpenBtn $btnSpaceOpen -ActionBtn $btnSpaceAction -CopyBtn $btnSpaceCopy }
+
+function Invoke-RowAction {
+    param($Row)
+    if (-not $Row -or -not $Row.Rule) { return }
+    $rule = $Row.Rule
+    if ($rule.RequiresAdmin -and -not $isAdmin) { Restart-AsAdministrator; return }
+    switch ($rule.Verdict) {
+        'Clean' {
+            $item = $global:ScannedCleanupItems | Where-Object { $_.Id -eq $rule.TargetId } | Select-Object -First 1
+            if ($item) { Start-CleanCategory -Item $item } else { Log-Console "Run Rescan first: the cleanup scan has no entry for $($rule.Title)." "WARN" }
+        }
+        'Command'   { Invoke-CommandAction -Id $rule.CommandId -Param $rule.Param }
+        'Uninstall' { Open-Settings -Rule $rule }
+    }
+}
+
+function Open-RowInExplorer {
+    param($Row)
+    if ($Row -and $Row.Path) {
+        if (Test-Path -LiteralPath $Row.Path -PathType Leaf) { Show-ItemInExplorer -Path $Row.Path | Out-Null } else { Open-FolderInExplorer -Path $Row.Path | Out-Null }
+        Log-Console "Opened in File Explorer: $($Row.Path)" "SUCCESS"
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Space Explorer
+# ---------------------------------------------------------------------------
+
+function Set-SpaceNode {
+    param($Node, [switch]$Reset)
+    if ($Reset) { $global:SpaceStack.Clear() }
+    [void]$global:SpaceStack.Add($Node)
+
+    $panelCrumbs.Children.Clear()
+    for ($i = 0; $i -lt $global:SpaceStack.Count; $i++) {
+        $n = $global:SpaceStack[$i]
+        $btn = New-Object System.Windows.Controls.Button
+        $btn.Content = if ($i -eq 0) { $n.Path } else { $n.Name }
+        $btn.Style = $window.FindResource('CrumbButton'); $btn.Tag = $i
+        $btn.add_Click({ param($s, $e) Move-SpaceUp -ToIndex ([int]$s.Tag) })
+        [void]$panelCrumbs.Children.Add($btn)
+        if ($i -lt $global:SpaceStack.Count - 1) {
+            $sep = New-Object System.Windows.Controls.TextBlock
+            $sep.Text = '>'; $sep.Foreground = $brushConverter.ConvertFromString('#A1A1AA'); $sep.VerticalAlignment = 'Center'
+            [void]$panelCrumbs.Children.Add($sep)
+        }
+    }
+
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($child in $Node.Children) { [void]$rows.Add((New-SpaceRow -Node $child -ParentBytes $Node.Bytes)) }
+    if ($Node.OwnBytes -gt 0) {
+        $own = [PSCustomObject]@{ Path = $Node.Path; Bytes = [long]$Node.OwnBytes; Files = [long]0; ModifiedTicks = 0 }
+        $row = New-SpaceRow -Node $own -ParentBytes $Node.Bytes -Name '(files and small folders here)' -Display $Node.Path
+        $row.Insight = ''; $row.FilesText = ''; $row.Rule = $null; $row.Node = $null
+        [void]$rows.Add($row)
+    }
+    $gridSpace.ItemsSource = $rows
+    Set-Empty $txtEmptyExplorer $rows
+    if ($rows.Count -eq 0) { $txtEmptyExplorer.Text = 'This folder has nothing over 1 MB.' }
+    $btnSpaceUp.IsEnabled = $global:SpaceStack.Count -gt 1
+    if ($rows.Count -gt 0) { $gridSpace.SelectedIndex = 0 }
+    Show-SpaceSelection
+}
+
+function Move-SpaceUp {
+    param([int]$ToIndex = -1)
+    if ($global:SpaceStack.Count -le 1) { return }
+    if ($ToIndex -lt 0) { $ToIndex = $global:SpaceStack.Count - 2 }
+    while ($global:SpaceStack.Count -gt $ToIndex + 1) { $global:SpaceStack.RemoveAt($global:SpaceStack.Count - 1) }
+    $target = $global:SpaceStack[$global:SpaceStack.Count - 1]
+    $global:SpaceStack.RemoveAt($global:SpaceStack.Count - 1)
+    Set-SpaceNode -Node $target
+}
+
+function Enter-SpaceRow {
+    $row = $gridSpace.SelectedItem
+    if ($row -and $row.Node -is [Diskman.Node]) { Set-SpaceNode -Node $row.Node }
+}
+
+# ---------------------------------------------------------------------------
+# Scans
+# ---------------------------------------------------------------------------
+
+function Start-SpaceScan {
+    # A scan that is already running would show sizes from before the change that asked for a new one: queue exactly one more
+    if ($global:Jobs.scan) {
+        $global:RescanPending = $true
+        Log-Console "A drive scan is already running; another will start when it finishes so the sizes are current." "WARN"
+        return
+    }
+    Start-BackgroundJob -Slot scan -Status "Scanning the whole $driveLetter drive" `
+        -Context @{} `
+        -Work {
+            $tree = Scan-DriveTree -Root "$($env:SystemDrive)\"
+            # Everything that only reads the finished tree runs here, so the window never freezes at the end of a scan
+            [PSCustomObject]@{ Tree = $tree; Detected = @(Find-AppCaches -Root $tree); Categories = (Get-SpaceCategory -Root $tree) }
+        } `
+        -OnDone {
+            param($out, $ctx)
+            $bundle = @($out) | Where-Object { $_.PSObject.Properties['Tree'] } | Select-Object -Last 1
+            if ($bundle) { Show-ScanResults -Bundle $bundle -Partial ([bool]$ctx['Cancelled']) } else { Log-Console "The drive scan returned no data." "ERROR" }
+            $again = $global:RescanPending -and -not $ctx['Cancelled']
+            $global:RescanPending = $false
+            if ($again) { Start-SpaceScan }
+        }
+}
+
+# ---------------------------------------------------------------------------
+# Cleaner tab
+# ---------------------------------------------------------------------------
+
 function Update-SelectedCleanupBadge {
     $totalSelectedBytes = 0
     $selectedCount = 0
-
     foreach ($item in $global:ScannedCleanupItems) {
-        if ($item.IsSelected -eq $true) {
-            $totalSelectedBytes += $item.RawBytes
-            $selectedCount++
-        }
+        if ($item.IsSelected -eq $true) { $totalSelectedBytes += $item.RawBytes; $selectedCount++ }
     }
-
     $txtCleanBadge.Text = "Selected: $(Format-Bytes -Bytes $totalSelectedBytes) ($selectedCount categories)"
 }
 
-# Function: Apply Filter on Cleanable Grid and highlight the active chip
 function Apply-CleanupFilter {
     param([string]$Group)
     $global:CurrentFilterGroup = $Group
@@ -3076,15 +4710,12 @@ function Apply-CleanupFilter {
         $chips[$key].Background  = $brushConverter.ConvertFromString($(if ($active) { "#0077B6" } else { "#2A2A30" }))
         $chips[$key].BorderBrush = $brushConverter.ConvertFromString($(if ($active) { "#00B4D8" } else { "#3F3F46" }))
     }
-
-    if ($gridCleanCategories.Items.Count -gt 0) {
-        $gridCleanCategories.SelectedIndex = 0
-    }
+    if ($gridCleanCategories.Items.Count -gt 0) { $gridCleanCategories.SelectedIndex = 0 }
 }
 
-# Function: Show scan results. Full scan replaces the list; a partial scan (after cleaning) replaces only those rows.
+# Full scan replaces the list; a partial scan (after cleaning) replaces only those rows.
 function Set-ScanResults {
-    param($Items, [switch]$Merge)
+    param($Items, [switch]$Merge, [switch]$Quiet)
 
     $items = @($Items | Where-Object { $_ -and $_.Id })
     if ($Merge) {
@@ -3092,18 +4723,21 @@ function Set-ScanResults {
         $kept = @($global:ScannedCleanupItems | Where-Object { $_.Id -notin $ids })
         $items = @($kept + $items) | Sort-Object -Property @{ Expression = { $_.RawBytes }; Descending = $true }, @{ Expression = { $_.CategoryName }; Descending = $false }
     }
+    if (-not $Merge -and -not $Quiet) {
+        # A fresh scan of the fixed categories must not forget the app caches detected by the drive scan
+        $items = @($items + @($global:ScannedCleanupItems | Where-Object { $_.Dynamic })) | Sort-Object -Property @{ Expression = { $_.RawBytes }; Descending = $true }, @{ Expression = { $_.CategoryName }; Descending = $false }
+    }
     $global:ScannedCleanupItems = [System.Collections.ArrayList]@($items)
     Apply-CleanupFilter $global:CurrentFilterGroup
 
-    # Rebuild the Inspector dropdown (ordered by size) and keep the user's current choice
     $previousId = if ($cmbInspectTarget.SelectedItem) { ($cmbInspectTarget.SelectedItem -split " - ")[0].Trim() } else { $null }
     $cmbInspectTarget.Items.Clear()
     $totalReclaimable = 0
     foreach ($item in $items) {
         $totalReclaimable += $item.RawBytes
         $dispLabel = if ($item.RawBytes -gt 0) { "$($item.Id) - $($item.CategoryName) ($($item.DisplaySize))" } else { "$($item.Id) - $($item.CategoryName)" }
-        $cmbInspectTarget.Items.Add($dispLabel) | Out-Null
-        if (-not $Merge -and $item.RawBytes -gt 0) {
+        if (-not $item.Dynamic) { $cmbInspectTarget.Items.Add($dispLabel) | Out-Null }
+        if (-not $Merge -and -not $Quiet -and $item.RawBytes -gt 0) {
             Log-Console "Detected $($item.CategoryName): $($item.DisplaySize) ($($item.FileCount)) at $($item.Target)"
         }
     }
@@ -3117,122 +4751,29 @@ function Set-ScanResults {
 
     $txtCReclaimable.Text = "~$(Format-Bytes -Bytes $totalReclaimable)"
     Update-SelectedCleanupBadge
-    if (-not $Merge) {
-        Log-Console "Scan complete! Total reclaimable space on C: drive: $(Format-Bytes -Bytes $totalReclaimable)" "SUCCESS"
+    Update-FreeSafely
+    Update-ActionCards
+    Update-OverviewVerdict
+    if (-not $Merge -and -not $Quiet) {
+        Log-Console "Cleaner scan complete: $(Format-Bytes -Bytes $totalReclaimable) found across cleanup categories." "SUCCESS"
     }
 }
 
-# Function: Scan C: Drive Junk (all targets, or only the given ids after a cleanup)
 function Start-ScanCJunk {
     param([string[]]$Id)
-    Start-BackgroundJob -Status "Scanning C: drive for unnecessary files, caches, logs, and trash" `
+    Start-BackgroundJob -Status "Scanning cleanup categories" `
         -Vars @{ Ids = $Id } `
         -Context @{ Merge = [bool]$Id } `
         -Work { if ($Ids) { Scan-SmartCleanupItems -Id $Ids } else { Scan-SmartCleanupItems } } `
         -OnDone { param($out, $ctx) Set-ScanResults -Items $out -Merge:$ctx.Merge }
 }
 
-# Selection Presets
-$btnSelectRec.add_Click({
-    foreach ($item in $global:ScannedCleanupItems) {
-        if ($item.RequiresAdmin -and -not $isAdmin) {
-            $item.IsSelected = $false
-        } else {
-            $item.IsSelected = ($item.Recommended -and $item.SafetyLevel -ne 'Advanced' -and $item.RawBytes -gt 0)
-        }
-    }
-    $gridCleanCategories.Items.Refresh()
-    Update-SelectedCleanupBadge
-    Log-Console "Applied recommended cleanup selection preset (Advanced and Optional targets excluded by default)."
-})
-
-$btnSelectAll.add_Click({
-    foreach ($item in $global:ScannedCleanupItems) {
-        $item.IsSelected = ($item.RawBytes -gt 0)
-    }
-    $gridCleanCategories.Items.Refresh()
-    Update-SelectedCleanupBadge
-    Log-Console "Selected all available C: junk categories."
-})
-
-$btnClearSel.add_Click({
-    foreach ($item in $global:ScannedCleanupItems) {
-        $item.IsSelected = $false
-    }
-    $gridCleanCategories.Items.Refresh()
-    Update-SelectedCleanupBadge
-    Log-Console "Cleared all selections."
-})
-
-# Ticking a box in the grid bubbles a Click up to the grid: refresh the total
-$gridCleanCategories.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler]{ Update-SelectedCleanupBadge })
-
-# Filter Chips
-$btnFilterAll.add_Click({ Apply-CleanupFilter "All" })
-$btnFilterSys.add_Click({ Apply-CleanupFilter "Windows & System" })
-$btnFilterGaming.add_Click({ Apply-CleanupFilter "Gaming" })
-$btnFilterDev.add_Click({ Apply-CleanupFilter "Developer" })
-$btnFilterBrowser.add_Click({ Apply-CleanupFilter "Browser" })
-
-# Category Selection Changed in Grid
-$gridCleanCategories.add_SelectionChanged({
-    $sel = $gridCleanCategories.SelectedItem
-    if ($sel) {
-        $txtSelectedCatTitle.Text = "$($sel.DisplayName)"
-        $bullet = [char]0x2022
-        $txtSelectedCatSizeInfo.Text = "$bullet Size on C: $($sel.DisplaySize) ($($sel.FileCount))"
-
-        $badgeText = if ($sel.SafetyBadge) { $sel.SafetyBadge } else { $sel.SafetyLevel.ToUpper() }
-        $txtSelectedCatSafetyBadge.Text = $badgeText
-        $badgeColor = switch ($sel.SafetyLevel) { 'Advanced' { "#E63946" } 'Optional' { "#FFB703" } default { "#2EC4B6" } }
-        $badgeSafetyLevel.Background = $brushConverter.ConvertFromString($badgeColor)
-
-        $txtCategoryWhatDeleted.Text = if ($sel.WhatGetsDeleted) { $sel.WhatGetsDeleted } else { $sel.Description }
-        $txtCategorySafetyExp.Text = if ($sel.SafetyExplanation) { $sel.SafetyExplanation } else { "Safe to delete. User documents and credentials are untouched." }
-        $txtCategoryConsequences.Text = if ($sel.Consequences) { $sel.Consequences } else { "Files will be regenerated or re-downloaded as needed." }
-    }
-})
-
-# 1. Action: Open in File Explorer
-$btnOpenCatInExplorer.add_Click({
-    $sel = $gridCleanCategories.SelectedItem
-    if (-not $sel) {
-        [System.Windows.MessageBox]::Show("Please select a junk category to open in File Explorer.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
-        return
-    }
-
-    if ($sel.Type -eq "RecycleBin") {
-        Start-Process "explorer.exe" -ArgumentList "shell:RecycleBinFolder"
-        Log-Console "Opened Windows Recycle Bin in File Explorer." "SUCCESS"
-    } else {
-        $opened = Open-FolderInExplorer -Path $sel.Target
-        if ($opened) {
-            Log-Console "Opened in File Explorer: $($sel.Target)" "SUCCESS"
-        } else {
-            Log-Console "Folder does not exist or is currently empty: $($sel.Target)" "WARN"
-            [System.Windows.MessageBox]::Show("The target folder ($($sel.Target)) does not exist or has no files.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
-        }
-    }
-})
-
-# 2. Action: Inspect Category Files (Switch to File Inspector Tab)
-$btnInspectCatFiles.add_Click({
-    $sel = $gridCleanCategories.SelectedItem
-    if (-not $sel) {
-        [System.Windows.MessageBox]::Show("Please select a category to inspect its files.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
-        return
-    }
-
-    for ($i = 0; $i -lt $cmbInspectTarget.Items.Count; $i++) {
-        if ($cmbInspectTarget.Items[$i] -like "$($sel.Id) - *") {
-            $cmbInspectTarget.SelectedIndex = $i
-            break
-        }
-    }
-
-    $mainTabControl.SelectedIndex = 1
-    $btnRefreshInspectFiles.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
-})
+# Full rescan of everything: cleanup categories (action slot) and the whole-drive tree (scan slot)
+function Start-FullRescan {
+    Update-CDriveMetricsDisplay
+    Start-ScanCJunk
+    Start-SpaceScan
+}
 
 # Worker-side progress callback shared by both cleanup actions (runs on the worker, queues lines for the UI)
 $cleanupWork = {
@@ -3247,23 +4788,26 @@ $cleanupDone = {
     $res = @($out) | Where-Object { $_.PSObject.Properties['TotalFreedBytes'] } | Select-Object -Last 1
     $freed = if ($res) { $res.DisplayFreed } else { "0 B" }
     $purged = if ($res) { $res.DeletedCount } else { 0 }
-    Log-Console "CLEANUP FINISHED! Total space freed: $freed ($purged items purged)" "SUCCESS"
-    [System.Windows.MessageBox]::Show(
-        "$($ctx.Title) Complete!`n`nFreed Space: $freed`nPurged Items: $purged`n`nSee the Activity log for details, including anything skipped.",
-        "Diskman - Cleanup finished",
-        [System.Windows.MessageBoxButton]::OK,
-        [System.Windows.MessageBoxImage]::Information
-    )
-    Start-ScanCJunk -Id $ctx.Ids
+    $delta = if ($ctx.FreeBefore) { "$driveLetter free space went from $(Format-Bytes $ctx.FreeBefore) to $(Format-Bytes (Get-DriveState).Free)." } else { '' }
+    Log-Console "CLEANUP FINISHED! Total space freed: $freed ($purged items purged). $delta" "SUCCESS"
+    Show-Info "$($ctx.Title) complete.`n`nFreed space: $freed`nPurged items: $purged`n$delta`n`nThe Activity log (and the audit file in $global:AuditLogDir) lists anything that was skipped."
+    # Detected app caches are not in the fixed list, so they are re-measured directly; fixed categories are rescanned by id
+    foreach ($id in @($ctx.Ids | Where-Object { $_ -like 'App:*' })) {
+        $item = $global:ScannedCleanupItems | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+        if ($item) { [void](Update-DetectedItemSize -Item $item) }
+    }
+    $fixedIds = @($ctx.Ids | Where-Object { $_ -notlike 'App:*' })
+    if ($fixedIds.Count -gt 0) { Start-ScanCJunk -Id $fixedIds }
+    else { Set-ScanResults -Items @($global:ScannedCleanupItems) -Quiet }
+    if ($global:SpaceTree) { Start-SpaceScan }
 }
 
-# 3. Action: Clean Selected Junk (bulk)
-$btnRunCleanup.add_Click({
-    $targetsToClean = @($global:ScannedCleanupItems | Where-Object { $_.IsSelected -eq $true -and $_.RawBytes -gt 0 })
+function Start-BulkClean {
+    param($Targets)
+    $targetsToClean = @($Targets)
     $totalCleanBytes = [int64](($targetsToClean | Measure-Object -Property RawBytes -Sum).Sum)
-
     if ($targetsToClean.Count -eq 0) {
-        [System.Windows.MessageBox]::Show("No items are selected for cleanup.`n`nPlease check the boxes next to the categories you want to clean.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+        Show-Info "No items are selected for cleanup.`n`nTick the boxes next to the categories you want to clean."
         return
     }
 
@@ -3271,93 +4815,157 @@ $btnRunCleanup.add_Click({
     $optCount  = @($targetsToClean | Where-Object { $_.SafetyLevel -eq 'Optional' }).Count
     $advCount  = @($targetsToClean | Where-Object { $_.SafetyLevel -eq 'Advanced' }).Count
 
-    $breakdown = "Selected Breakdown: $safeCount Safe, $optCount Optional, $advCount Advanced."
-    if ($advCount -gt 0) {
-        $breakdown += "`n`n[ADVANCED NOTICE] Windows Update and servicing caches are selected. Diskman skips them while Windows Update, BITS or servicing reports activity or a pending reboot."
-    }
-    if ($optCount -gt 0) {
-        $breakdown += "`n`n[OPTIONAL NOTICE] Developer, offline media or Recycle Bin items are selected. Caches are re-downloaded on demand."
-    }
+    $breakdown = "Selected: $safeCount Safe, $optCount Optional, $advCount Advanced."
+    if ($advCount -gt 0) { $breakdown += "`n`n[ADVANCED] Windows Update and servicing caches are selected. Diskman skips them while Windows Update, BITS or servicing reports activity or a pending reboot." }
+    if ($optCount -gt 0) { $breakdown += "`n`n[OPTIONAL] Developer, offline media or Recycle Bin items are selected. Caches are re-downloaded on demand." }
     if (@($targetsToClean | Where-Object { $_.Type -eq 'RecycleBin' }).Count -gt 0) {
         $breakdown += "`n`n[RECYCLE BIN] Everything currently in the Recycle Bin will be permanently deleted. It cannot be restored."
     }
 
     $bullet = [char]0x2022
-    $confirmMsg = "Proceed with cleaning $(Format-Bytes -Bytes $totalCleanBytes) across $($targetsToClean.Count) selected C: drive categories?`n`n" +
-                  "$breakdown`n`n" +
+    $largest = ($targetsToClean | Sort-Object -Property RawBytes -Descending | Select-Object -First 10 | ForEach-Object { "$bullet $($_.CategoryName): $($_.DisplaySize)" }) -join "`n"
+    if ($targetsToClean.Count -gt 10) { $largest += "`n$bullet ... and $($targetsToClean.Count - 10) more" }
+    $confirmMsg = "Clean $(Format-Bytes -Bytes $totalCleanBytes) across $($targetsToClean.Count) categories on ${driveLetter}?`n`nLargest:`n$largest`n`n$breakdown`n`n" +
                   "What Diskman will and will not touch:`n" +
                   "$bullet Only the folders listed in the table are cleaned. Deleted files do NOT go to the Recycle Bin.`n" +
                   "$bullet Documents, Desktop, Downloads, Pictures, Music, Videos and OneDrive are blocked from bulk cleanup.`n" +
                   "$bullet Browser passwords, cookies, history and bookmarks are never deleted.`n" +
                   "$bullet Files that are in use are skipped and reported in the log.`n`n" +
-                  "Execute cleanup?"
-
-    $confirm = [System.Windows.MessageBox]::Show(
-        $confirmMsg,
-        "Confirm C: Drive Cleanup",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Warning
-    )
-    if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
+                  "Clean now?"
+    if (-not (Confirm-Action $confirmMsg "Confirm $driveLetter drive cleanup")) { return }
 
     Log-Console "=========================================================="
-    Log-Console "Total Selected Space: $(Format-Bytes -Bytes $totalCleanBytes) ($($targetsToClean.Count) categories: $safeCount Safe, $optCount Optional, $advCount Advanced)"
+    Log-Console "Cleaning approved by user: $(Format-Bytes -Bytes $totalCleanBytes) in $($targetsToClean.Count) categories ($safeCount Safe, $optCount Optional, $advCount Advanced)"
     if (@($targetsToClean | Where-Object { $_.RequiresAdmin -eq $true }).Count -gt 0 -and -not $isAdmin) {
-        Log-Console "Notice: Selected system items require Administrator rights. Run via run.bat (Admin) if locked items are skipped." "WARN"
+        Log-Console "Notice: Selected system items require Administrator rights and will be skipped." "WARN"
     }
 
-    Start-BackgroundJob -Status "Cleaning C: drive" `
+    Start-BackgroundJob -Status "Cleaning $driveLetter drive" `
         -Vars @{ Items = $targetsToClean; TargetId = $null } `
-        -Context @{ Title = "C: Drive Cleanup"; Ids = @($targetsToClean | ForEach-Object { $_.Id }) } `
+        -Context @{ Title = "$driveLetter drive cleanup"; Ids = @($targetsToClean | ForEach-Object { $_.Id }); FreeBefore = (Get-DriveState).Free } `
         -Work $cleanupWork -OnDone $cleanupDone
-})
+}
 
-# 4. Action: Clean Single Category
-$btnCleanSingleCategory.add_Click({
-    $sel = $gridCleanCategories.SelectedItem
-    if (-not $sel) {
-        [System.Windows.MessageBox]::Show("Please select a category to clean.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
-        return
-    }
+function Start-CleanCategory {
+    param($Item)
+    if (-not $Item) { return }
+    if ($Item.RawBytes -le 0) { Show-Info "The selected category ($($Item.CategoryName)) is already empty."; return }
+    if (-not $Item.CanSelect) { Restart-AsAdministrator; return }
 
-    if ($sel.RawBytes -le 0) {
-        [System.Windows.MessageBox]::Show("The selected category ($($sel.CategoryName)) is already empty.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
-        return
-    }
+    $safetyText = if ($Item.SafetyExplanation) { $Item.SafetyExplanation } else { "Safe to delete. User files and credentials are untouched." }
+    $deletedText = if ($Item.WhatGetsDeleted) { $Item.WhatGetsDeleted } else { $Item.Description }
+    $consequencesText = if ($Item.Consequences) { $Item.Consequences } else { "Files auto-regenerate on next launch." }
+    $badgeText = if ($Item.SafetyBadge) { $Item.SafetyBadge } else { $Item.SafetyLevel.ToUpper() }
 
-    $safetyText = if ($sel.SafetyExplanation) { $sel.SafetyExplanation } else { "Safe to delete. User files and credentials are untouched." }
-    $deletedText = if ($sel.WhatGetsDeleted) { $sel.WhatGetsDeleted } else { $sel.Description }
-    $consequencesText = if ($sel.Consequences) { $sel.Consequences } else { "Files auto-regenerate on next launch." }
-    $badgeText = if ($sel.SafetyBadge) { $sel.SafetyBadge } else { $sel.SafetyLevel.ToUpper() }
-
-    $dialogMsg = "CLEANUP VERIFICATION & IMPACT DETAILS`n`n" +
-                 "Category: $($sel.CategoryName) [$badgeText]`n" +
-                 "Size on C: $($sel.DisplaySize) ($($sel.FileCount))`n" +
-                 "Path: $($sel.Target)`n`n" +
+    $dialogMsg = "Category: $($Item.CategoryName) [$badgeText]`n" +
+                 "Size: $($Item.DisplaySize) ($($Item.FileCount))`n" +
+                 "Path: $($Item.Target)`n`n" +
                  "[WHAT GETS DELETED]`n$deletedText`n`n" +
                  "[SAFETY & PROTECTED DATA]`n$safetyText`n`n" +
                  "[CONSEQUENCES & REBUILD]`n$consequencesText`n`n" +
                  "Deleted files do not go to the Recycle Bin. Proceed?"
+    if (-not (Confirm-Action $dialogMsg "Confirm cleanup - $($Item.CategoryName)" 'Question')) { return }
 
-    $confirm = [System.Windows.MessageBox]::Show(
-        $dialogMsg,
-        "Confirm Cleanup - $($sel.CategoryName)",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Question
-    )
-    if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
-
-    Start-BackgroundJob -Status "Purging $($sel.CategoryName)" `
-        -Vars @{ Items = $null; TargetId = $sel.Id } `
-        -Context @{ Title = $sel.CategoryName; Ids = @($sel.Id) } `
+    Log-Console "Cleaning approved by user: $($Item.CategoryName) ($($Item.DisplaySize)) at $(@($Item.Targets + $Item.Target | Where-Object { $_ } | Select-Object -Unique) -join '; ')" "WARN"
+    # Every item goes through Invoke-ExecuteCleanup (detected ones are not known to Invoke-ExecuteCategoryCleanup)
+    $Item.IsSelected = $true
+    Start-BackgroundJob -Status "Purging $($Item.CategoryName)" `
+        -Vars @{ Items = @($Item); TargetId = $null } `
+        -Context @{ Title = $Item.CategoryName; Ids = @($Item.Id); FreeBefore = (Get-DriveState).Free } `
         -Work $cleanupWork -OnDone $cleanupDone
+}
+
+# ---------------------------------------------------------------------------
+# Event wiring
+# ---------------------------------------------------------------------------
+
+$btnSelectRec.add_Click({
+    foreach ($item in $global:ScannedCleanupItems) {
+        if (-not $item.CanSelect) { $item.IsSelected = $false }
+        else { $item.IsSelected = ($item.Recommended -and $item.SafetyLevel -ne 'Advanced' -and $item.RawBytes -gt 0) }
+    }
+    $gridCleanCategories.Items.Refresh()
+    Update-SelectedCleanupBadge
+    Log-Console "Applied recommended cleanup selection preset (Advanced and Optional targets excluded by default)."
+})
+$btnSelectAll.add_Click({
+    foreach ($item in $global:ScannedCleanupItems) { $item.IsSelected = ($item.RawBytes -gt 0 -and $item.CanSelect) }
+    $gridCleanCategories.Items.Refresh()
+    Update-SelectedCleanupBadge
+    Log-Console "Selected all available junk categories."
+})
+$btnClearSel.add_Click({
+    foreach ($item in $global:ScannedCleanupItems) { $item.IsSelected = $false }
+    $gridCleanCategories.Items.Refresh()
+    Update-SelectedCleanupBadge
+    Log-Console "Cleared all selections."
+})
+$gridCleanCategories.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler]{ Update-SelectedCleanupBadge })
+
+$btnFilterAll.add_Click({ Apply-CleanupFilter "All" })
+$btnFilterSys.add_Click({ Apply-CleanupFilter "Windows & System" })
+$btnFilterGaming.add_Click({ Apply-CleanupFilter "Gaming" })
+$btnFilterDev.add_Click({ Apply-CleanupFilter "Developer" })
+$btnFilterBrowser.add_Click({ Apply-CleanupFilter "Browser" })
+
+$gridCleanCategories.add_SelectionChanged({
+    $sel = $gridCleanCategories.SelectedItem
+    if ($sel) {
+        $txtSelectedCatTitle.Text = "$($sel.DisplayName)"
+        $bullet = [char]0x2022
+        $txtSelectedCatSizeInfo.Text = "$bullet Size: $($sel.DisplaySize) ($($sel.FileCount))"
+        $txtSelectedCatSafetyBadge.Text = if ($sel.SafetyBadge) { $sel.SafetyBadge } else { $sel.SafetyLevel.ToUpper() }
+        $badgeColor = switch ($sel.SafetyLevel) { 'Advanced' { "#C1121F" } 'Optional' { "#FFB703" } default { "#2EC4B6" } }
+        $badgeSafetyLevel.Background = $brushConverter.ConvertFromString($badgeColor)
+        $txtSelectedCatSafetyBadge.Foreground = $brushConverter.ConvertFromString($(if ($sel.SafetyLevel -eq 'Advanced') { '#FFFFFF' } else { '#141416' }))
+        $txtCategoryWhatDeleted.Text = if ($sel.WhatGetsDeleted) { $sel.WhatGetsDeleted } else { $sel.Description }
+        $txtCategorySafetyExp.Text = if ($sel.SafetyExplanation) { $sel.SafetyExplanation } else { "Safe to delete. User documents and credentials are untouched." }
+        $txtCategoryConsequences.Text = if ($sel.Consequences) { $sel.Consequences } else { "Files will be regenerated or re-downloaded as needed." }
+    }
 })
 
-# Tab 2: File Inspector Logic
+$btnOpenCatInExplorer.add_Click({
+    $sel = $gridCleanCategories.SelectedItem
+    if (-not $sel) { Show-Info "Select a category to open in File Explorer."; return }
+    if ($sel.Type -eq "RecycleBin") {
+        Start-Process "explorer.exe" -ArgumentList "shell:RecycleBinFolder"
+        Log-Console "Opened Windows Recycle Bin in File Explorer." "SUCCESS"
+    } elseif (Open-FolderInExplorer -Path $sel.Target) {
+        Log-Console "Opened in File Explorer: $($sel.Target)" "SUCCESS"
+    } else {
+        Log-Console "Folder does not exist or is currently empty: $($sel.Target)" "WARN"
+        Show-Info "The target folder ($($sel.Target)) does not exist or has no files."
+    }
+})
+
+$btnInspectCatFiles.add_Click({
+    $sel = $gridCleanCategories.SelectedItem
+    if (-not $sel) { Show-Info "Select a category to inspect its files."; return }
+    if ($sel.Dynamic) {
+        # Detected app caches are not in the Inspector's list: show the first folder in Explorer instead of loading some other category
+        Open-FolderInExplorer -Path $sel.Target | Out-Null
+        Log-Console "Opened $($sel.Target) in File Explorer (detected caches are not listed in the File Inspector)." "SUCCESS"
+        return
+    }
+    for ($i = 0; $i -lt $cmbInspectTarget.Items.Count; $i++) {
+        if ($cmbInspectTarget.Items[$i] -like "$($sel.Id) - *") { $cmbInspectTarget.SelectedIndex = $i; break }
+    }
+    $mainTabControl.SelectedItem = $tabInspector
+    $btnRefreshInspectFiles.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+})
+
+$btnRunCleanup.add_Click({ Start-BulkClean -Targets @($global:ScannedCleanupItems | Where-Object { $_.IsSelected -eq $true -and $_.RawBytes -gt 0 }) })
+$btnCleanSingleCategory.add_Click({
+    $sel = $gridCleanCategories.SelectedItem
+    if (-not $sel) { Show-Info "Select a category to clean."; return }
+    Start-CleanCategory -Item $sel
+})
+$btnFreeSafely.add_Click({ Start-BulkClean -Targets (Get-SafeCleanItems) })
+
+# File Inspector
 $btnRefreshInspectFiles.add_Click({
     $selTargetStr = $cmbInspectTarget.SelectedItem
     if (-not $selTargetStr) { return }
-
     $targetId = ($selTargetStr -split " - ")[0].Trim()
     Start-BackgroundJob -Status "Loading file list for $targetId" `
         -Vars @{ TargetId = $targetId } `
@@ -3367,41 +4975,28 @@ $btnRefreshInspectFiles.add_Click({
             param($out, $ctx)
             $files = @($out)
             $gridInspectFiles.ItemsSource = $files
+            Set-Empty $txtEmptyInspector $files
+            if ($files.Count -eq 0) { $txtEmptyInspector.Text = 'No files found in this category.' }
             $totalInspectBytes = [int64](($files | Measure-Object -Property RawBytes -Sum).Sum)
             $txtInspectSummary.Text = "Loaded $($files.Count) files (Total: $(Format-Bytes -Bytes $totalInspectBytes))"
             Log-Console "Loaded $($files.Count) files for $($ctx.TargetId) ($(Format-Bytes -Bytes $totalInspectBytes))" "SUCCESS"
         }
 })
-
 $gridInspectFiles.add_SelectionChanged({
     $sel = $gridInspectFiles.SelectedItem
-    if ($sel) {
-        $txtSelectedInspectInfo.Text = "$($sel.Name) ($($sel.DisplaySize)) - Path: $($sel.FullPath)"
-    } else {
-        $txtSelectedInspectInfo.Text = "Select a file to inspect or delete."
-    }
+    $txtSelectedInspectInfo.Text = if ($sel) { "$($sel.Name) ($($sel.DisplaySize)) - Path: $($sel.FullPath)" } else { "Select a file to inspect or delete." }
 })
-
 $btnRevealInspectFile.add_Click({
     $sel = $gridInspectFiles.SelectedItem
     if ($sel -and (Test-Path -LiteralPath $sel.FullPath)) {
         Show-ItemInExplorer -Path $sel.FullPath
         Log-Console "Revealed in File Explorer: $($sel.FullPath)" "SUCCESS"
-    } else {
-        [System.Windows.MessageBox]::Show("Please select a valid file to reveal.", "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
-    }
+    } else { Show-Info "Select a valid file to reveal." }
 })
-
 $btnDeleteSingleInspectFile.add_Click({
     $sel = $gridInspectFiles.SelectedItem
     if ($sel -and (Test-Path -LiteralPath $sel.FullPath)) {
-        $confirm = [System.Windows.MessageBox]::Show(
-            "Permanently delete file '$($sel.Name)' ($($sel.DisplaySize))?`n`nPath: $($sel.FullPath)",
-            "Confirm File Delete",
-            [System.Windows.MessageBoxButton]::YesNo,
-            [System.Windows.MessageBoxImage]::Question
-        )
-        if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
+        if (Confirm-Action "Permanently delete file '$($sel.Name)' ($($sel.DisplaySize))?`n`nPath: $($sel.FullPath)" "Confirm file delete" 'Question') {
             $res = Remove-ItemPermanently -Path $sel.FullPath
             if ($res.Success) {
                 Log-Console "Deleted file: $($sel.FullPath)" "SUCCESS"
@@ -3409,26 +5004,17 @@ $btnDeleteSingleInspectFile.add_Click({
                 Update-CDriveMetricsDisplay
             } else {
                 Log-Console "Failed to delete file: $($res.Message)" "ERROR"
-                [System.Windows.MessageBox]::Show($res.Message, "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+                Show-Info $res.Message 'Diskman' 'Error'
             }
         }
     }
 })
-
 $btnPurgeAllInspect.add_Click({
     $selTargetStr = $cmbInspectTarget.SelectedItem
     if (-not $selTargetStr) { return }
     $targetId = ($selTargetStr -split " - ")[0].Trim()
-
-    # This button cleans the whole category, not just the (at most 250) files listed in the table
-    $confirm = [System.Windows.MessageBox]::Show(
-        "Delete EVERYTHING in '$selTargetStr'?`n`nThis cleans the whole category, not only the files listed in this table. Deleted files do not go to the Recycle Bin.",
-        "Confirm Clear All",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Warning
-    )
-    if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
-
+    if (-not (Confirm-Action "Delete EVERYTHING in '$selTargetStr'?`n`nThis cleans the whole category, not only the files listed in this table. Deleted files do not go to the Recycle Bin." "Confirm clear all")) { return }
+    Log-Console "Whole-category cleaning approved by user: $selTargetStr" "WARN"
     Start-BackgroundJob -Status "Purging $targetId" `
         -Vars @{ Items = $null; TargetId = $targetId } `
         -Context @{ Title = $targetId; Ids = @($targetId) } `
@@ -3436,64 +5022,47 @@ $btnPurgeAllInspect.add_Click({
             param($out, $ctx)
             & $cleanupDone $out $ctx
             $gridInspectFiles.ItemsSource = @()
-            $txtInspectSummary.Text = "Select a category and click Load Files to inspect individual files."
+            Set-Empty $txtEmptyInspector @()
+            $txtInspectSummary.Text = "Pick a category and click Load Files to list its biggest files."
         }
 })
 
-# Tab 3: Large File Hunter Setup
+# Large Files
 $cmbHuntSize.Items.Add("> 100 MB") | Out-Null
 $cmbHuntSize.Items.Add("> 500 MB") | Out-Null
 $cmbHuntSize.Items.Add("> 1 GB")   | Out-Null
 $cmbHuntSize.Items.Add("> 5 GB")   | Out-Null
 $cmbHuntSize.SelectedIndex = 0
-
-$cmbHuntCat.Items.Add("All Categories")        | Out-Null
-$cmbHuntCat.Items.Add("Installer / Package")   | Out-Null
-$cmbHuntCat.Items.Add("Disk Image / ISO")      | Out-Null
-$cmbHuntCat.Items.Add("Archive / Zip")         | Out-Null
-$cmbHuntCat.Items.Add("Video / Media")         | Out-Null
-$cmbHuntCat.Items.Add("Log / Dump File")       | Out-Null
-$cmbHuntCat.Items.Add("AI Model / Weights")         | Out-Null
-$cmbHuntCat.Items.Add("Incomplete / Temp Download") | Out-Null
+foreach ($c in 'All Categories', 'Installer / Package', 'Disk Image / ISO', 'Archive / Zip', 'Video / Media', 'Log / Dump File', 'AI Model / Weights', 'Incomplete / Temp Download') { $cmbHuntCat.Items.Add($c) | Out-Null }
 $cmbHuntCat.SelectedIndex = 0
 
 $btnHuntScan.add_Click({
-    $sizeMap = @{
-        "> 100 MB" = 100MB
-        "> 500 MB" = 500MB
-        "> 1 GB"   = 1GB
-        "> 5 GB"   = 5GB
-    }
+    $sizeMap = @{ "> 100 MB" = 100MB; "> 500 MB" = 500MB; "> 1 GB" = 1GB; "> 5 GB" = 5GB }
     $minSize = $sizeMap[$cmbHuntSize.SelectedItem]
     if (-not $minSize) { $minSize = 100MB }
     $cat = $cmbHuntCat.SelectedItem
-
-    Start-BackgroundJob -Status "Hunting large files in C:\ ($($cmbHuntSize.SelectedItem) | $cat)" `
-        -Vars @{ MinSize = $minSize; Cat = $cat } `
-        -Work { Find-LargeFiles -TargetPath "C:\" -MinSizeBytes $MinSize -CategoryFilter $Cat -Limit 100 } `
+    Start-BackgroundJob -Status "Hunting large files on $driveRoot ($($cmbHuntSize.SelectedItem) | $cat)" `
+        -Vars @{ MinSize = $minSize; Cat = $cat; Root = $driveRoot } `
+        -Work { Find-LargeFiles -TargetPath $Root -MinSizeBytes $MinSize -CategoryFilter $Cat -Limit 100 } `
         -OnDone {
             param($out)
             $files = @($out)
             $gridLargeFiles.ItemsSource = $files
-            Log-Console "Discovered $($files.Count) large files on C: drive." "SUCCESS"
+            Set-Empty $txtEmptyHunter $files
+            if ($files.Count -eq 0) { $txtEmptyHunter.Text = 'No matching files found. Try a lower minimum size or All Categories.' }
+            Log-Console "Discovered $($files.Count) large files on the $driveLetter drive." "SUCCESS"
         }
 })
-
 $gridLargeFiles.add_SelectionChanged({
     $sel = $gridLargeFiles.SelectedItem
-    if ($sel) {
-        $txtSelectedLargeFile.Text = "$($sel.Name) ($($sel.DisplaySize)) - $($sel.FullPath)"
-    } else {
-        $txtSelectedLargeFile.Text = "Select a large file to perform action."
-    }
+    $txtSelectedLargeFile.Text = if ($sel) { "$($sel.Name) ($($sel.DisplaySize)) - $($sel.FullPath)" } else { "Select a large file to perform action." }
 })
-
-# Remove a handled file from the Hunter table without rescanning the whole drive
 function Remove-HunterRow {
     param([string]$FullPath)
-    $gridLargeFiles.ItemsSource = @($gridLargeFiles.ItemsSource | Where-Object { $_.FullPath -ne $FullPath })
+    $remaining = @($gridLargeFiles.ItemsSource | Where-Object { $_.FullPath -ne $FullPath })
+    $gridLargeFiles.ItemsSource = $remaining
+    Set-Empty $txtEmptyHunter $remaining
 }
-
 $btnRevealLargeFile.add_Click({
     $sel = $gridLargeFiles.SelectedItem
     if ($sel -and (Test-Path -LiteralPath $sel.FullPath)) {
@@ -3501,17 +5070,10 @@ $btnRevealLargeFile.add_Click({
         Log-Console "Revealed file in File Explorer: $($sel.FullPath)" "SUCCESS"
     }
 })
-
 $btnTrashLargeFile.add_Click({
     $sel = $gridLargeFiles.SelectedItem
     if ($sel -and (Test-Path -LiteralPath $sel.FullPath)) {
-        $confirm = [System.Windows.MessageBox]::Show(
-            "Move this file to Recycle Bin?`n`nFile: $($sel.FullPath)`nSize: $($sel.DisplaySize)`nType: $($sel.Category)",
-            "Safe Recycle Confirmation",
-            [System.Windows.MessageBoxButton]::YesNo,
-            [System.Windows.MessageBoxImage]::Question
-        )
-        if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
+        if (Confirm-Action "Move this file to the Recycle Bin?`n`nFile: $($sel.FullPath)`nSize: $($sel.DisplaySize)`nType: $($sel.Category)" "Move to Recycle Bin" 'Question') {
             $res = Send-ItemToRecycleBin -Path $sel.FullPath -SingleFile
             if ($res.Success) {
                 Log-Console "Recycled file: $($sel.FullPath)" "SUCCESS"
@@ -3519,122 +5081,93 @@ $btnTrashLargeFile.add_Click({
                 Update-CDriveMetricsDisplay
             } else {
                 Log-Console "Could not recycle $($sel.FullPath): $($res.Message)" "ERROR"
-                [System.Windows.MessageBox]::Show($res.Message, "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
+                Show-Info $res.Message 'Diskman' 'Warning'
             }
         }
     }
 })
-
 $btnPermDeleteLargeFile.add_Click({
     $sel = $gridLargeFiles.SelectedItem
     if ($sel -and (Test-Path -LiteralPath $sel.FullPath)) {
         $diskImageNote = if ($sel.Category -eq 'Disk Image / ISO') { "`n`nDisk images can hold a whole virtual machine or OS install. Make sure you do not need it." } else { "" }
-        $confirm = [System.Windows.MessageBox]::Show(
-            "PERMANENT DELETE WARNING!`n`nThis cannot be undone and skips the Recycle Bin.`n`nFile: $($sel.FullPath)`nSize: $($sel.DisplaySize)`nType: $($sel.Category)$diskImageNote`n`nProceed?",
-            "Permanent Delete",
-            [System.Windows.MessageBoxButton]::YesNo,
-            [System.Windows.MessageBoxImage]::Warning
-        )
-        if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
+        if (Confirm-Action "PERMANENT DELETE`n`nThis cannot be undone and skips the Recycle Bin.`n`nFile: $($sel.FullPath)`nSize: $($sel.DisplaySize)`nType: $($sel.Category)$diskImageNote`n`nDelete it?" "Permanent delete") {
             $res = Remove-ItemPermanently -Path $sel.FullPath -SingleFile
             if ($res.Success) {
-                Log-Console "Deleted file: $($sel.FullPath)" "WARN"
+                Log-Console "Deleted file permanently: $($sel.FullPath)" "WARN"
                 Remove-HunterRow $sel.FullPath
                 Update-CDriveMetricsDisplay
             } else {
                 Log-Console "Could not delete $($sel.FullPath): $($res.Message)" "ERROR"
-                [System.Windows.MessageBox]::Show($res.Message, "Diskman", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
+                Show-Info $res.Message 'Diskman' 'Warning'
             }
         }
     }
 })
 
-# Tab 4: Directory Explorer Setup
-function Load-Directory {
-    param([string]$Path)
-    $txtPath.Text = $Path
-    $global:CurrentExplorerPath = $Path
-    $global:ExplorerLoaded = $true
+# Overview and Space Explorer
+$gridTopFolders.add_SelectionChanged({ Show-OverviewSelection })
+$btnOverviewOpen.add_Click({ Open-RowInExplorer $gridTopFolders.SelectedItem })
+$btnOverviewAction.add_Click({ Invoke-RowAction $gridTopFolders.SelectedItem })
+$gridSpace.add_SelectionChanged({ Show-SpaceSelection })
+$gridSpace.add_MouseDoubleClick({ Enter-SpaceRow })
+$gridSpace.add_PreviewKeyDown({
+    param($sender, $e)
+    if ($e.Key -eq 'Return') { Enter-SpaceRow; $e.Handled = $true }
+    elseif ($e.Key -eq 'Back') { Move-SpaceUp; $e.Handled = $true }
+})
+$btnSpaceUp.add_Click({ Move-SpaceUp })
+$btnSpaceOpen.add_Click({ Open-RowInExplorer $gridSpace.SelectedItem })
+$btnSpaceCopy.add_Click({
+    $row = $gridSpace.SelectedItem
+    if ($row -and $row.Path) { [System.Windows.Clipboard]::SetText($row.Path); Log-Console "Copied path: $($row.Path)" "SUCCESS" }
+})
+$btnSpaceAction.add_Click({ Invoke-RowAction $gridSpace.SelectedItem })
 
-    Start-BackgroundJob -Status "Scanning C: directory $Path (folder sizes can take a while on large folders)" `
-        -Vars @{ Dir = $Path } `
-        -Context @{ Dir = $Path } `
-        -Work { Start-FolderScan -DirectoryPath $Dir } `
-        -OnDone {
-            param($out, $ctx)
-            $items = @($out)
-            $gridDir.ItemsSource = $items
-            Log-Console "Loaded $($items.Count) items in $($ctx.Dir)" "SUCCESS"
-        }
-}
-
-$btnScanDir.add_Click({ Load-Directory $txtPath.Text })
-$btnFolderUp.add_Click({
-    $parent = Split-Path -Parent $global:CurrentExplorerPath
-    if (-not [string]::IsNullOrWhiteSpace($parent)) {
-        Load-Directory $parent
-    }
-})
-$btnOpenDirInExplorer.add_Click({
-    Open-FolderInExplorer -Path $global:CurrentExplorerPath
-    Log-Console "Opened in File Explorer: $global:CurrentExplorerPath" "SUCCESS"
-})
-$gridDir.add_MouseDoubleClick({
-    $selected = $gridDir.SelectedItem
-    if ($selected -and $selected.IsFolder -and (Test-Path -LiteralPath $selected.FullPath)) {
-        Load-Directory $selected.FullPath
-    }
-})
-
-# Top Header Actions
-$btnTopRefresh.add_Click({
-    Update-CDriveMetricsDisplay
-    Start-ScanCJunk
-})
-$btnTopQuickScan.add_Click({
-    $mainTabControl.SelectedIndex = 0
-    Start-ScanCJunk
-})
+# Header and status bar
+$btnTopQuickScan.add_Click({ Start-FullRescan })
 $btnScanClean.add_Click({ Start-ScanCJunk })
+$btnCancelScan.add_Click({ Stop-BackgroundJob -Slot scan })
+$btnCancelAction.add_Click({ Stop-BackgroundJob -Slot action })
+$btnRestartAdmin.add_Click({ Restart-AsAdministrator })
+$btnRestartAdmin.Visibility = if ($isAdmin) { 'Collapsed' } else { 'Visible' }
+$txtLogLocation.Text = "Audit log: $global:AuditLogDir"
 
-# Initial Startup Banner in Terminal & UI
+# Startup banner
 Log-Console "=========================================================="
-Log-Console "DISKMAN - C: DRIVE STORAGE CLEANER & JUNK PURGER"
-Log-Console "Real-time activity and deletion logs will stream live below."
+Log-Console "DISKMAN - DRIVE SPACE CLEANER ($driveLetter)"
+Log-Console "Every action is logged here and in $global:AuditLogDir"
 if ($isAdmin) {
-    Log-Console "Elevated Administrator Mode active [Full Access - Protected Servicing Boundaries Enforced]" "SUCCESS"
+    Log-Console "Elevated Administrator mode: system areas can be measured and cleaned." "SUCCESS"
 } else {
-    Log-Console "Standard Mode: Run as Administrator to clean system items" "WARN"
+    Log-Console "Standard mode: some system areas are skipped. Use Restart as Administrator for the full picture." "WARN"
 }
 Log-Console "=========================================================="
 
-Update-CDriveMetricsDisplay
 Apply-CleanupFilter "All"
+Set-Empty $txtEmptyHunter @()
+Set-Empty $txtEmptyInspector @()
+Set-Empty $txtEmptyExplorer @()
+Set-Empty $txtEmptyTop @()
+$window.Title = "Diskman - $driveLetter drive space cleaner"
+(Find-Control 'TxtBrandSub').Text = "  |  $driveLetter drive space cleaner"
+Update-CDriveMetricsDisplay
+Update-FreeSafely
+Update-ActionCards
 
-# Render the GUI window immediately, then scan in the background
+# Render the window immediately, then scan in the background
 $window.add_ContentRendered({
     if (-not $global:ScanStarted) {
         $global:ScanStarted = $true
         Start-ScanCJunk
-    }
-})
-
-# Load the Directory Explorer the first time its tab is opened (ignore selection events bubbling up from the grids)
-$mainTabControl.add_SelectionChanged({
-    param($sender, $e)
-    if ($e.OriginalSource -eq $mainTabControl -and $mainTabControl.SelectedIndex -eq 3 -and -not $global:ExplorerLoaded) {
-        Load-Directory $global:CurrentExplorerPath
+        Start-SpaceScan
     }
 })
 
 # Do not let the window close in the middle of a delete without asking
 $window.add_Closing({
     param($sender, $e)
-    if ($global:Job) {
-        $answer = [System.Windows.MessageBox]::Show(
-            "An operation is still running. Closing now stops it part-way.`n`nClose anyway?",
-            "Diskman", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-        if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { $e.Cancel = $true }
+    if ($global:Jobs.action -or $global:Jobs.scan) {
+        if (-not (Confirm-Action "An operation is still running. Closing now stops it part-way.`n`nClose anyway?" "Diskman")) { $e.Cancel = $true }
     }
 })
 

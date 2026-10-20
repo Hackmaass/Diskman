@@ -4,8 +4,8 @@
 
 **A lightweight Windows storage visualizer and cache cleaner, built entirely in native PowerShell and WPF.**
 
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4?style=for-the-badge&logo=windows&logoColor=white)](https://microsoft.com/windows)
-[![PowerShell](https://img.shields.io/badge/powershell-5.1%20%7C%207%2B-5391fe?style=for-the-badge&logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/)
+[![Platform](https://img.shields.io/badge/tested%20on-Windows%2011-0078d4?style=for-the-badge&logo=windows&logoColor=white)](https://microsoft.com/windows)
+[![PowerShell](https://img.shields.io/badge/tested%20with-Windows%20PowerShell%205.1-5391fe?style=for-the-badge&logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-2ea44f?style=for-the-badge)](#architecture)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
@@ -20,7 +20,7 @@
 
 ---
 
-Diskman analyzes drive `C:\` to identify and reclaim storage from application caches, GPU shaders, developer package stores, and system logs that standard Windows tools ignore. It runs with **zero external runtimes, no background services, and no installer**, and pairs deep file inspection with strict fail-closed safety guards.
+Diskman scans drive `C:\` once, accounts for every byte of used space, and tells you what each big folder is and what to do about it: clean a cache, run a safe command, uninstall an app, or just review it. It also reclaims storage from application caches, GPU shaders, developer package stores, and system logs that standard Windows tools ignore. It runs with **zero external runtimes, no background services, and no installer**, and pairs deep file inspection with strict fail-closed safety guards.
 
 <table>
 <tr>
@@ -70,9 +70,9 @@ powershell -STA -ExecutionPolicy Bypass -File .\src\app.ps1
 
 | Component | Requirement |
 | :--- | :--- |
-| **Operating system** | Windows 10 (Build 1809+) or Windows 11 |
-| **PowerShell** | Windows PowerShell 5.1 (built-in) or PowerShell 7+ |
-| **Privileges** | Administrator is optional, but required to scan and clean system-level targets such as `C:\Windows\Temp` and CBS servicing logs |
+| **Operating system** | Tested on Windows 11. Windows 10 (build 1809 or later) uses the same Windows features and is expected to work, but has not been tested. |
+| **PowerShell** | Windows PowerShell 5.1 (built in to Windows; this is what everything is tested with). PowerShell 7 is untested. |
+| **Privileges** | Administrator is optional, but required to scan and clean system-level targets such as `C:\Windows\Temp` and CBS servicing logs. The elevated path is exercised by the test suite only in a dry-run mode; see Development |
 
 > [!TIP]
 > Without Administrator rights, Diskman still scans and cleans every per-user target. System-level targets are simply skipped.
@@ -83,25 +83,20 @@ powershell -STA -ExecutionPolicy Bypass -File .\src\app.ps1
 
 ```
 +-------------------------------------------------------------------------------------------------+
-| DISKMAN  |  C: Drive Storage Cleaner & Junk Purger                                              |
-| C: Capacity: 476.2 GB   Used: 312.4 GB   Free: 163.8 GB   [||||||||||||||.....] 65.6% Used      |
+| Diskman  |  C: drive space cleaner                          [Restart as Administrator] [Rescan]   |
+| Total 220.4 GB   Used 211.0 GB   Free 9.4 GB   [||||||||||||||||||||.] 95.7% used - Critical       |
 +-------------------------------------------------------------------------------------------------+
-| [ C: Drive Junk Cleaner ]  [ File Inspector ]  [ Large Files Hunter ]  [ Directory Explorer ]   |
-|                                                                                                 |
-|   Select Recommended | Select All | Clear All | Filter: All | System | Gaming | Dev | Apps       |
-|  +----+----------------------------------+---------------+-----------+---------+-------------+  |
-|  | [X]| NVIDIA DirectX Shader Cache      | Gaming & GPU  |   3.42 GB | 1,420   | SAFE        |  |
-|  | [X]| Windows User Temp                | System        |   2.18 GB | 3,850   | SAFE        |  |
-|  | [ ]| NuGet Package Cache              | Developer     |  12.40 GB | 18,200  | OPTIONAL    |  |
-|  | [ ]| Windows Update Download Cache    | System        |   5.10 GB |   412   | ADVANCED    |  |
-|  +----+----------------------------------+---------------+-----------+---------+-------------+  |
-|                                                                                                 |
-|  Target Files & Data        Safety & Protected Data        Post-Cleanup Impact                  |
-|  Precompiled DirectX GPU    Safe: Driver-compiled cache.   Games recompile shaders on launch;   |
-|  shader binaries in         Saves, settings, and profiles  may cause slight initial stutter.    |
-|  %LOCALAPPDATA%\NVIDIA.     are untouched.                                                      |
+| [ Overview ] [ Cleaner ] [ Space Explorer ] [ Large Files ] [ File Inspector ]                    |
+|                                                                                                   |
+|  9.42 GB free of 220.4 GB. Critically low. About 8.8 GB can be freed safely right now.            |
+|  WHERE YOUR SPACE WENT  [Apps 48%][Dev tools 21%][Windows 18%][Files 2%][Caches][Protected 7%]    |
+|  BIGGEST FOLDERS                                      |  [ Free 8.8 GB safely ]                   |
+|   C:\Windows\WinSxS        17.9 GB  Component cleanup  |  RECOMMENDED ACTIONS                      |
+|   ~\AppData\Local\Docker   16.4 GB  Prune Docker data  |   Windows User Temp   6.9 GB  [Clean...]  |
+|   ~\AppData\Local\Temp      6.9 GB  Clean (Safe)       |   Docker Desktop data 16.4 GB [Prune...]  |
+|   C:\Program Files\...Remix 10.0 GB  Uninstall          |  WINDOWS-MANAGED SPACE  swapfile, ...     |
 +-------------------------------------------------------------------------------------------------+
-| Real-time PowerShell execution log console...                                                   |
+| Activity log (also saved to %LOCALAPPDATA%\Diskman\logs)                                          |
 +-------------------------------------------------------------------------------------------------+
 ```
 
@@ -109,11 +104,28 @@ powershell -STA -ExecutionPolicy Bypass -File .\src\app.ps1
 <tr>
 <td width="50%" valign="top">
 
+### 🧭 Overview and Space Explorer
+
+One background pass over the whole drive builds a size tree. The Overview answers "why is my drive full": a verdict, a bar showing where the space went, the biggest folders with advice for each, and ranked actions with a one-click **Free space safely** (Safe items only, one confirmation). Space Explorer lets you drill through the same tree with a breadcrumb. Space that only an administrator can see (shadow copies, protected areas) is shown as its own labelled row, never hidden. Advice comes from a rules table: `Clean`, `Command` (fixed allow-list such as `docker system prune`), `Uninstall`, `Review`, or `System`. Unknown folders are never offered for deletion.
+
+**Detected app caches.** After each scan Diskman also finds the cache folders of the apps installed for you: every browser profile, Electron apps and VS Code-family editors. It recognises them by what is *inside* a folder (for example `Cache_Data\index` for a Chromium cache, `User\settings.json` next to `CachedData` for an editor), never by name alone, so an unrelated folder called `Cache` stays out. They appear in the Cleaner as `<App> caches (detected)`, grouped per app. Claude's app data and Microsoft Store packages are never offered.
+
+**Docker and WSL disks.** Docker Desktop and WSL keep data in `.vhdx` files that grow but never shrink. Diskman lists the registered ones and, as administrator with Docker Desktop and WSL stopped, can compact them to give back space that was already freed inside. Disks are found only through Docker's own paths and WSL's registration, so other apps' virtual machine disks are never touched. `docker system prune` is offered when the Docker engine is running.
+
+**Works on any PC.** Folders no rule knows still get plain-language guidance based on where they sit (installed program, Steam game, your own files, Store app data, tool data, Windows). That guidance can only say *uninstall in Settings*, *review* or *keep*, never delete, and drivers and Windows components are on a keep-list. The Windows drive letter, language and disk type are detected rather than assumed: shadow-copy size comes from WMI instead of translated text, and a spinning disk is scanned with fewer parallel threads than an SSD.
+
+**Honest results.** After every clean the dialog and log show how C: free space really changed (before and after), not only what Diskman counted. When not running as administrator, the Overview says how much more an administrator session would unlock.
+
+</td>
+<td width="50%" valign="top">
+
 ### 🧹 Storage Cleaner
 
 Scans 36 storage categories across the operating system, developer tools, game launchers, and desktop applications. Shows file counts, disk usage, and a safety tier for each target. A three-pane inspection panel explains what will be removed, why it is safe, and what to expect afterwards.
 
 </td>
+</tr>
+<tr>
 <td width="50%" valign="top">
 
 ### 🔍 File Inspector
@@ -132,9 +144,9 @@ Finds large files on `C:\` using configurable thresholds (100 MB, 500 MB, 1 GB, 
 </td>
 <td width="50%" valign="top">
 
-### 📊 Directory Explorer
+### 🧾 Audit log
 
-A fast folder-size profiler that maps disk usage across top-level `C:\` directories to surface unexpected space hogs.
+Every scan, deletion and command is also appended to `%LOCALAPPDATA%\Diskman\logs\diskman-yyyyMMdd.log`, so there is a record after the window closes.
 
 </td>
 </tr>
@@ -270,15 +282,19 @@ Diskman/
 │   ├── modules/
 │   │   ├── 00-Utils.ps1             # Path safety engine, servicing detection, size formatters
 │   │   ├── Get-DriveMetrics.ps1     # Real-time C: drive capacity and metrics
+│   │   ├── Scan-DriveTree.ps1       # One-pass size tree (compiled walker), accounting, categories, biggest folders
+│   │   ├── Get-SpaceRules.ps1       # What each big folder is, the verdict, and the command allow-list
+│   │   ├── Get-SystemSpace.ps1      # swapfile, paging file, hibernation, shadow copies, WinSxS
 │   │   ├── Invoke-SmartCleanup.ps1  # Target definitions, scanner, and cleanup routines
 │   │   ├── Invoke-ShellActions.ps1  # Explorer integration and Recycle Bin operations
-│   │   ├── Find-LargeFiles.ps1      # Large file search and classification
-│   │   └── Start-FolderScan.ps1     # Directory tree profiler
+│   │   └── Find-LargeFiles.ps1      # Large file search and classification
 │   ├── xaml/
 │   │   └── MainWindow.xaml          # WPF UI layout and styling
 │   └── app.ps1                      # Application bootstrapper and UI controller
 ├── release/
 │   └── diskman.ps1                  # Compiled standalone distribution
+├── tools/
+│   └── Invoke-GuiSmoke.ps1          # Launches the real app, takes screenshots of each tab, closes (read-only)
 ├── Compile.ps1                      # Release compiler (inlines modules and XAML)
 ├── test_verify.ps1                  # Verification suite (AST, safety checks, unit tests)
 ├── run.bat                          # Launcher with auto-elevation
@@ -291,7 +307,7 @@ Diskman/
 
 ## Development & Testing
 
-**Run the test suite** — validates path safety barriers, servicing detection, module loading, AST syntax, and compilation:
+**Run the test suite** — validates path safety barriers, servicing detection, sandbox deletion, the space analyzer (tree, accounting, rules, command allow-list), GUI control wiring, AST syntax, and compilation:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\test_verify.ps1

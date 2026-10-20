@@ -2,7 +2,7 @@ function Find-LargeFiles {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
-        [string]$TargetPath = "C:\",
+        [string]$TargetPath = $(if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') + '\' } else { 'C:\' }),
 
         [Parameter(Mandatory = $false)]
         [long]$MinSizeBytes = 100MB,

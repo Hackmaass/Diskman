@@ -30,7 +30,19 @@ Diskman incorporates a multi-layer safety guard engine (`Test-PathSafety`) built
 6. **Boot & Kernel Protection**:
    - Critical virtual memory and boot files (`pagefile.sys`, `swapfile.sys`, `hiberfil.sys`, `bootmgr`, `bootstat.dat`, `BCD`) are protected.
 
-7. **Fail-Closed Default**:
+7. **Command allow-list**:
+   - The Space Analyzer can run only five fixed commands (`docker system prune -f`, `Dism /Online /Cleanup-Image /StartComponentCleanup`, `powercfg /h off`, `vssadmin delete shadows /for=C: /oldest`, and a `diskpart` compaction of a Docker/WSL disk). Commands are never built from scanned folder names. Each needs a confirmation that names its side effects (for example, `powercfg /h off` also disables Fast Startup; deleting shadow copies removes a restore point). Administrator-only commands are refused when Diskman is not elevated.
+   - Disk compaction accepts only a path that exactly matches a disk found through Docker's fixed locations or a WSL distribution's registered `BasePath`. It refuses other virtual disks (for example other apps' VM disks), requires administrator rights, refuses while Docker Desktop is running, shuts WSL down, checks the file can be opened exclusively, and runs `diskpart` from a fixed script (`select vdisk`, `attach vdisk readonly`, `compact vdisk`, `detach vdisk`).
+   - Detected app caches are recognised by folder contents, never by name alone. Claude's app data folder, Microsoft Store package folders and anything already covered by a fixed target are excluded, and each detected folder still passes the bulk safety gate before anything is deleted.
+   - `Review` and `System` advice never has a delete button, and the Claude desktop app's data folder is never offered for deletion.
+
+8. **Restart as Administrator**:
+   - When Diskman runs from a file, the button relaunches that same file elevated. When it was started with `irm | iex` there is no file, so Diskman asks first and then downloads and runs the current `release/diskman.ps1` from the `main` branch elevated. That is the same trust as the original one-line install: pin a release tag if you want a reviewed version.
+
+9. **Audit log**:
+   - Every scan, deletion and command is appended to `%LOCALAPPDATA%\Diskman\logs\diskman-yyyyMMdd.log`.
+
+10. **Fail-Closed Default**:
    - Any unknown path, unresolvable path, access error, or unexpected exception causes `Test-PathSafety` to return `Safe = $false`.
 
 ---

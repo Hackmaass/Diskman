@@ -3,7 +3,8 @@ function Get-CDriveMetrics {
     param()
 
     try {
-        $cDrive = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.Name -like "C:*" -and $_.IsReady } | Select-Object -First 1
+        $sysDriveRoot = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') + '\' } else { 'C:\' }
+        $cDrive = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.Name -ieq $sysDriveRoot -and $_.IsReady } | Select-Object -First 1
         if ($cDrive) {
             $totalGB = [math]::Round($cDrive.TotalSize / 1GB, 2)
             $freeGB = [math]::Round($cDrive.AvailableFreeSpace / 1GB, 2)
